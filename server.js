@@ -1,7 +1,8 @@
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
-const pdfParse = require("pdf-parse");
+const pdfParseModule = require("pdf-parse");
+const pdfParse = pdfParseModule.default || pdfParseModule;
 
 const app = express();
 const PORT = process.env.PORT || 4000;
