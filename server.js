@@ -1,8 +1,8 @@
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
-const pdfParseModule = require("pdf-parse");
-const pdfParse = pdfParseModule.default || pdfParseModule;
+require("pdf-parse/worker");
+const { PDFParse } = require("pdf-parse");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -93,8 +93,6 @@ function extractItems(rawText) {
     .filter(Boolean);
 
   for (const line of lines) {
-    // Ejemplo real:
-    // 200 102V S ESTUCHE MODELO 102V SURTIDO 719,00 0,00 % 0,00 % 143.800,00
     const m = line.match(
       /^(\d+)\s+([A-Z0-9]+(?:\s+[A-Z0-9]+)?)\s+(.+?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s+0,00\s+%\s+0,00\s+%\s+(\d{1,3}(?:\.\d{3})*,\d{2})$/i
     );
@@ -122,6 +120,8 @@ app.get("/api/health", (req, res) => {
 });
 
 app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
+  let parser = null;
+
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -156,8 +156,9 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
       });
     }
 
-    const pdf = await pdfParse(buffer);
-    const rawText = pdf.text || "";
+    parser = new PDFParse({ data: buffer });
+    const pdf = await parser.getText();
+    const rawText = pdf?.text || "";
     const text = normalizeSpaces(rawText);
 
     const remitoNro = extractRemitoNumero(text);
@@ -210,7 +211,16 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
     return res.status(500).json({
       ok: false,
       error: "Error interno del servidor al procesar el archivo.",
+      detail: error?.message || String(error),
     });
+  } finally {
+    try {
+      if (parser && typeof parser.destroy === "function") {
+        await parser.destroy();
+      }
+    } catch (destroyError) {
+      console.error("Error destruyendo parser:", destroyError);
+    }
   }
 });
 
