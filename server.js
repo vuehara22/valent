@@ -207,20 +207,13 @@ function extractItems(rawText, maxItems = 30) {
     m = line.match(flexiblePattern);
 
     if (m) {
-      const cantidad = m[1];
-      const codigo = m[2];
-      const descripcion = m[3];
-      const precioUnitario = m[4];
-      const ivaPct = m[5] || 0;
-      const bonifPct = m[6] || 0;
-
       const maybeItem = sanitizeItem({
-        cantidad,
-        codigo,
-        descripcion,
-        precioUnitario,
-        ivaPct,
-        bonifPct,
+        cantidad: m[1],
+        codigo: m[2],
+        descripcion: m[3],
+        precioUnitario: m[4],
+        ivaPct: m[5] || 0,
+        bonifPct: m[6] || 0,
       });
 
       if (isValidParsedItem(maybeItem)) {
@@ -252,6 +245,33 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+app.post("/api/debug-pdf", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file?.buffer) {
+      return res.status(400).json({ ok: false, error: "Sin archivo" });
+    }
+
+    const parsedPdf = await parsePdfWithTimeout(req.file.buffer);
+    const rawText = parsedPdf?.text || "";
+
+    return res.json({
+      ok: true,
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      textLength: rawText.length,
+      preview: rawText.slice(0, 3000),
+    });
+  } catch (error) {
+    console.error("Error en /api/debug-pdf:", error);
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || String(error),
+      stack: error?.stack || null,
+    });
+  }
+});
+
 app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
@@ -274,29 +294,13 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
     });
 
     const lowerName = String(originalname || "").toLowerCase();
-
     const isPdf =
       mimetype === "application/pdf" || lowerName.endsWith(".pdf");
 
-    const isImage =
-      String(mimetype || "").startsWith("image/") ||
-      lowerName.endsWith(".png") ||
-      lowerName.endsWith(".jpg") ||
-      lowerName.endsWith(".jpeg") ||
-      lowerName.endsWith(".webp");
-
-    if (!isPdf && !isImage) {
+    if (!isPdf) {
       return res.status(400).json({
         ok: false,
-        error: "Formato no soportado. Subí un PDF o una imagen.",
-      });
-    }
-
-    if (isImage) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          "Por ahora este backend parsea PDF. Las imágenes todavía no están soportadas.",
+        error: "Formato no soportado. Subí un PDF.",
       });
     }
 
@@ -308,14 +312,10 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
     }
 
     console.log("Antes de pdf-parse");
-
     const parsedPdf = await parsePdfWithTimeout(buffer);
 
     console.log("Después de pdf-parse", {
       numpages: parsedPdf?.numpages,
-      numrender: parsedPdf?.numrender,
-      info: parsedPdf?.info || null,
-      metadata: parsedPdf?.metadata ? "ok" : null,
       textLength: parsedPdf?.text ? parsedPdf.text.length : 0,
     });
 
@@ -326,7 +326,7 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
       return res.status(422).json({
         ok: false,
         error:
-          "El PDF no contiene texto legible para extraer. Puede ser un PDF escaneado o una imagen incrustada.",
+          "El PDF no contiene texto legible para extraer. Puede ser escaneado.",
       });
     }
 
@@ -382,18 +382,11 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
     console.error("stack:", error?.stack);
     console.error("full error:", error);
 
-    if (error?.message === "PDF parse timeout") {
-      return res.status(408).json({
-        ok: false,
-        error:
-          "El procesamiento del PDF tardó demasiado. Probá con otro archivo o con un PDF más liviano.",
-      });
-    }
-
     return res.status(500).json({
       ok: false,
       error: "Error interno del servidor al procesar el archivo.",
       detail: error?.message || String(error),
+      stack: error?.stack || null,
     });
   }
 });
