@@ -1,11 +1,12 @@
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
-require("pdf-parse/worker");
-const { PDFParse } = require("pdf-parse");
+const pdf = require("pdf-parse");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+
+console.log("Iniciando servidor...");
 
 app.use(cors());
 app.use(express.json());
@@ -238,8 +239,6 @@ app.get("/api/health", (req, res) => {
 });
 
 app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
-  let parser = null;
-
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -276,9 +275,8 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
       });
     }
 
-    parser = new PDFParse({ data: buffer });
-    const pdf = await parser.getText();
-    const rawText = pdf?.text || "";
+    const parsedPdf = await pdf(buffer);
+    const rawText = parsedPdf?.text || "";
     const text = normalizeSpaces(rawText);
 
     const remitoNro = extractRemitoNumero(text);
@@ -335,15 +333,15 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
       error: "Error interno del servidor al procesar el archivo.",
       detail: error?.message || String(error),
     });
-  } finally {
-    try {
-      if (parser && typeof parser.destroy === "function") {
-        await parser.destroy();
-      }
-    } catch (destroyError) {
-      console.error("Error destruyendo parser:", destroyError);
-    }
   }
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled Rejection:", reason);
 });
 
 app.listen(PORT, "0.0.0.0", () => {
