@@ -2,23 +2,15 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 
-const pdfParseModule = require("pdf-parse");
-const pdf =
-  typeof pdfParseModule === "function"
-    ? pdfParseModule
-    : typeof pdfParseModule?.default === "function"
-    ? pdfParseModule.default
-    : null;
+// IMPORTANTE: cargar worker antes de pdf-parse
+require("pdf-parse/worker");
+const { PDFParse } = require("pdf-parse");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 const PDF_PARSE_TIMEOUT = 10000;
 
 console.log("Iniciando servidor...");
-
-if (!pdf) {
-  console.error("Error: pdf-parse no exporta una función válida.");
-}
 
 app.use(cors());
 app.use(express.json());
@@ -236,19 +228,29 @@ function extractItems(rawText, maxItems = 30) {
   return dedupeItems(items).filter(isValidParsedItem).slice(0, maxItems);
 }
 
-function parsePdfWithTimeout(buffer, timeout = PDF_PARSE_TIMEOUT) {
-  if (!pdf) {
-    return Promise.reject(
-      new Error("pdf-parse no está disponible correctamente en el servidor")
-    );
-  }
+async function parsePdfWithTimeout(buffer, timeout = PDF_PARSE_TIMEOUT) {
+  let parser = null;
 
-  return Promise.race([
-    pdf(buffer),
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error("PDF parse timeout")), timeout);
-    }),
-  ]);
+  try {
+    parser = new PDFParse({ data: buffer });
+
+    const result = await Promise.race([
+      parser.getText(),
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("PDF parse timeout")), timeout);
+      }),
+    ]);
+
+    return result;
+  } finally {
+    try {
+      if (parser && typeof parser.destroy === "function") {
+        await parser.destroy();
+      }
+    } catch (destroyError) {
+      console.error("Error destruyendo parser:", destroyError);
+    }
+  }
 }
 
 app.get("/", (req, res) => {
@@ -337,7 +339,6 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
     const parsedPdf = await parsePdfWithTimeout(buffer);
 
     console.log("Después de pdf-parse", {
-      numpages: parsedPdf?.numpages,
       textLength: parsedPdf?.text ? parsedPdf.text.length : 0,
     });
 
