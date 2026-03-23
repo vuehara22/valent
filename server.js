@@ -33,6 +33,33 @@ function parseMoneyAR(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function parsePositiveInt(value, fallback) {
+  const n = Number.parseInt(String(value ?? "").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function getRequestedMaxItems(req) {
+  const candidates = [
+    req.body?.maxItems,
+    req.body?.max_items,
+    req.body?.itemLimit,
+    req.body?.limit,
+    req.body?.topK,
+    req.query?.maxItems,
+    req.query?.max_items,
+    req.query?.itemLimit,
+    req.query?.limit,
+    req.query?.topK,
+  ];
+
+  for (const candidate of candidates) {
+    const parsed = Number.parseInt(String(candidate ?? "").trim(), 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+
+  return 30;
+}
+
 function extractRemitoNumero(text) {
   const m = text.match(/N[º°o]?:\s*([0-9]+)/i);
   return m?.[1]?.trim() || "";
@@ -85,31 +112,122 @@ function extractCondIva(text) {
   return m?.[1]?.trim() || "";
 }
 
-function extractItems(rawText) {
+function sanitizeItem(item) {
+  return {
+    cantidad: Math.max(1, parsePositiveInt(item?.cantidad, 1)),
+    codigo: normalizeSpaces(item?.codigo),
+    descripcion: normalizeSpaces(item?.descripcion),
+    precioUnitario: Math.max(0, parseMoneyAR(item?.precioUnitario)),
+    ivaPct: Math.max(0, parseMoneyAR(item?.ivaPct)),
+    bonifPct: Math.max(0, parseMoneyAR(item?.bonifPct)),
+  };
+}
+
+function isValidParsedItem(item) {
+  if (!item) return false;
+
+  const codigo = normalizeSpaces(item.codigo);
+  const descripcion = normalizeSpaces(item.descripcion);
+  const cantidad = Number(item.cantidad) || 0;
+  const precioUnitario = Number(item.precioUnitario) || 0;
+
+  if (!codigo && !descripcion && cantidad <= 0 && precioUnitario <= 0) {
+    return false;
+  }
+
+  const lower = descripcion.toLowerCase();
+
+  if (
+    lower.startsWith("autocompletado desde archivo") ||
+    lower.endsWith(".pdf") ||
+    lower.endsWith(".png") ||
+    lower.endsWith(".jpg") ||
+    lower.endsWith(".jpeg")
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function dedupeItems(items) {
+  const seen = new Set();
+  const out = [];
+
+  for (const item of items) {
+    const key = [
+      Number(item.cantidad) || 0,
+      normalizeSpaces(item.codigo).toLowerCase(),
+      normalizeSpaces(item.descripcion).toLowerCase(),
+      Number(item.precioUnitario) || 0,
+    ].join("|");
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+
+  return out;
+}
+
+function extractItems(rawText, maxItems = 30) {
   const items = [];
   const lines = String(rawText || "")
-    .split("\n")
+    .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
 
+  const strictPattern =
+    /^(\d+)\s+([A-Z0-9][A-Z0-9\s\-/.]*)\s+(.+?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s+0,00\s+%\s+0,00\s+%\s+(\d{1,3}(?:\.\d{3})*,\d{2})$/i;
+
+  const flexiblePattern =
+    /^(\d+)\s+([A-Z0-9][A-Z0-9\s\-/.]*)\s+(.+?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})(?:\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*%)?(?:\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*%)?(?:\s+(\d{1,3}(?:\.\d{3})*,\d{2}))?$/i;
+
   for (const line of lines) {
-    const m = line.match(
-      /^(\d+)\s+([A-Z0-9]+(?:\s+[A-Z0-9]+)?)\s+(.+?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s+0,00\s+%\s+0,00\s+%\s+(\d{1,3}(?:\.\d{3})*,\d{2})$/i
-    );
+    if (items.length >= maxItems) break;
+
+    let m = line.match(strictPattern);
 
     if (m) {
-      items.push({
-        cantidad: Number(m[1]) || 1,
-        codigo: m[2].trim(),
-        descripcion: m[3].trim(),
-        precioUnitario: parseMoneyAR(m[4]),
-        ivaPct: 0,
-        bonifPct: 0,
+      items.push(
+        sanitizeItem({
+          cantidad: m[1],
+          codigo: m[2],
+          descripcion: m[3],
+          precioUnitario: m[4],
+          ivaPct: 0,
+          bonifPct: 0,
+        })
+      );
+      continue;
+    }
+
+    m = line.match(flexiblePattern);
+
+    if (m) {
+      const cantidad = m[1];
+      const codigo = m[2];
+      const descripcion = m[3];
+      const precioUnitario = m[4];
+      const ivaPct = m[5] || 0;
+      const bonifPct = m[6] || 0;
+
+      const maybeItem = sanitizeItem({
+        cantidad,
+        codigo,
+        descripcion,
+        precioUnitario,
+        ivaPct,
+        bonifPct,
       });
+
+      if (isValidParsedItem(maybeItem)) {
+        items.push(maybeItem);
+      }
     }
   }
 
-  return items;
+  return dedupeItems(items).filter(isValidParsedItem).slice(0, maxItems);
 }
 
 app.get("/api/health", (req, res) => {
@@ -131,11 +249,13 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
     }
 
     const { originalname, mimetype, size, buffer } = req.file;
+    const requestedMaxItems = getRequestedMaxItems(req);
 
     console.log("Archivo recibido:", {
       originalname,
       mimetype,
       size,
+      requestedMaxItems,
     });
 
     const isPdf = mimetype === "application/pdf";
@@ -171,7 +291,7 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
     const telefono = extractTelefono(text);
     const condVenta = extractCondVenta(text);
     const condIva = extractCondIva(text);
-    const items = extractItems(rawText);
+    const items = extractItems(rawText, requestedMaxItems);
 
     const warnings = [];
     if (!remitoNro) warnings.push("No detecté el número.");
@@ -202,6 +322,8 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
       },
       warnings,
       debug: {
+        requestedMaxItems,
+        detectedItems: items.length,
         textPreview: rawText.slice(0, 3000),
       },
     });
