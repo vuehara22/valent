@@ -1,13 +1,24 @@
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
-const pdf = require("pdf-parse");
+
+const pdfParseModule = require("pdf-parse");
+const pdf =
+  typeof pdfParseModule === "function"
+    ? pdfParseModule
+    : typeof pdfParseModule?.default === "function"
+    ? pdfParseModule.default
+    : null;
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 const PDF_PARSE_TIMEOUT = 10000;
 
 console.log("Iniciando servidor...");
+
+if (!pdf) {
+  console.error("Error: pdf-parse no exporta una función válida.");
+}
 
 app.use(cors());
 app.use(express.json());
@@ -226,6 +237,12 @@ function extractItems(rawText, maxItems = 30) {
 }
 
 function parsePdfWithTimeout(buffer, timeout = PDF_PARSE_TIMEOUT) {
+  if (!pdf) {
+    return Promise.reject(
+      new Error("pdf-parse no está disponible correctamente en el servidor")
+    );
+  }
+
   return Promise.race([
     pdf(buffer),
     new Promise((_, reject) => {
@@ -248,7 +265,10 @@ app.get("/api/health", (req, res) => {
 app.post("/api/debug-pdf", upload.single("file"), async (req, res) => {
   try {
     if (!req.file?.buffer) {
-      return res.status(400).json({ ok: false, error: "Sin archivo" });
+      return res.status(400).json({
+        ok: false,
+        error: "Sin archivo",
+      });
     }
 
     const parsedPdf = await parsePdfWithTimeout(req.file.buffer);
@@ -264,6 +284,7 @@ app.post("/api/debug-pdf", upload.single("file"), async (req, res) => {
     });
   } catch (error) {
     console.error("Error en /api/debug-pdf:", error);
+
     return res.status(500).json({
       ok: false,
       error: error?.message || String(error),
@@ -312,6 +333,7 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
     }
 
     console.log("Antes de pdf-parse");
+
     const parsedPdf = await parsePdfWithTimeout(buffer);
 
     console.log("Después de pdf-parse", {
@@ -381,6 +403,14 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
     console.error("message:", error?.message);
     console.error("stack:", error?.stack);
     console.error("full error:", error);
+
+    if (error?.message === "PDF parse timeout") {
+      return res.status(408).json({
+        ok: false,
+        error:
+          "El procesamiento del PDF tardó demasiado. Probá con otro archivo o con un PDF más liviano.",
+      });
+    }
 
     return res.status(500).json({
       ok: false,
