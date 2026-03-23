@@ -140,14 +140,20 @@ function isValidParsedItem(item) {
     return false;
   }
 
-  const lower = descripcion.toLowerCase();
+  const lowerDescripcion = descripcion.toLowerCase();
+  const lowerCodigo = codigo.toLowerCase();
 
   if (
-    lower.startsWith("autocompletado desde archivo") ||
-    lower.endsWith(".pdf") ||
-    lower.endsWith(".png") ||
-    lower.endsWith(".jpg") ||
-    lower.endsWith(".jpeg")
+    lowerDescripcion.startsWith("autocompletado desde archivo") ||
+    lowerDescripcion.endsWith(".pdf") ||
+    lowerDescripcion.endsWith(".png") ||
+    lowerDescripcion.endsWith(".jpg") ||
+    lowerDescripcion.endsWith(".jpeg") ||
+    lowerCodigo === "cantidad" ||
+    lowerCodigo === "codigo" ||
+    lowerDescripcion.includes("razón social") ||
+    lowerDescripcion.includes("condición de iva") ||
+    lowerDescripcion.includes("condicion de iva")
   ) {
     return false;
   }
@@ -176,52 +182,71 @@ function dedupeItems(items) {
 }
 
 function extractItems(rawText, maxItems = 30) {
-  const items = [];
-  const lines = String(rawText || "")
+  const originalLines = String(rawText || "")
     .split(/\r?\n/)
-    .map((l) => l.trim())
+    .map((l) => l.replace(/\s+/g, " ").trim())
     .filter(Boolean);
 
-  const strictPattern =
-    /^(\d+)\s+([A-Z0-9][A-Z0-9\s\-/.]*)\s+(.+?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s+0,00\s+%\s+0,00\s+%\s+(\d{1,3}(?:\.\d{3})*,\d{2})$/i;
+  const mergedLines = [];
+  let current = "";
 
-  const flexiblePattern =
-    /^(\d+)\s+([A-Z0-9][A-Z0-9\s\-/.]*)\s+(.+?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})(?:\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*%)?(?:\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*%)?(?:\s+(\d{1,3}(?:\.\d{3})*,\d{2}))?$/i;
+  for (const line of originalLines) {
+    const startsLikeItem = /^\d+\s+[A-Z0-9]/i.test(line);
 
-  for (const line of lines) {
+    if (startsLikeItem) {
+      if (current) mergedLines.push(current);
+      current = line;
+    } else if (current) {
+      current += " " + line;
+    }
+  }
+
+  if (current) mergedLines.push(current);
+
+  const items = [];
+
+  for (const line of mergedLines) {
     if (items.length >= maxItems) break;
 
-    let m = line.match(strictPattern);
+    const startMatch = line.match(/^(\d+)\s+([A-Z0-9][A-Z0-9\-/.]*)\s+(.+)$/i);
+    if (!startMatch) continue;
 
-    if (m) {
-      items.push(
-        sanitizeItem({
-          cantidad: m[1],
-          codigo: m[2],
-          descripcion: m[3],
-          precioUnitario: m[4],
-          ivaPct: 0,
-          bonifPct: 0,
-        })
-      );
-      continue;
-    }
+    const cantidad = parsePositiveInt(startMatch[1], 1);
+    const codigo = normalizeSpaces(startMatch[2]);
+    const resto = normalizeSpaces(startMatch[3]);
 
-    m = line.match(flexiblePattern);
+    const moneyMatches = [...resto.matchAll(/\d{1,3}(?:\.\d{3})*,\d{2}/g)].map(
+      (m) => m[0]
+    );
 
-    if (m) {
-      const maybeItem = sanitizeItem({
-        cantidad: m[1],
-        codigo: m[2],
-        descripcion: m[3],
-        precioUnitario: m[4],
-        ivaPct: m[5] || 0,
-        bonifPct: m[6] || 0,
-      });
+    if (!moneyMatches.length) continue;
 
-      if (isValidParsedItem(maybeItem)) {
-        items.push(maybeItem);
-      }
+    const precioUnitario = parseMoneyAR(moneyMatches[0]);
+
+    const pctMatches = [...resto.matchAll(/(\d{1,3}(?:,\d{2})?)\s*%/g)].map(
+      (m) => m[1]
+    );
+
+    const ivaPct = pctMatches[0] ? parseMoneyAR(pctMatches[0]) : 0;
+    const bonifPct = pctMatches[1] ? parseMoneyAR(pctMatches[1]) : 0;
+
+    const firstMoneyIndex = resto.search(/\d{1,3}(?:\.\d{3})*,\d{2}/);
+    let descripcion =
+      firstMoneyIndex > 0 ? resto.slice(0, firstMoneyIndex).trim() : resto;
+
+    descripcion = normalizeSpaces(descripcion);
+
+    const item = sanitizeItem({
+      cantidad,
+      codigo,
+      descripcion,
+      precioUnitario,
+      ivaPct,
+      bonifPct,
+    });
+
+    if (isValidParsedItem(item)) {
+      items.push(item);
     }
   }
 
@@ -283,6 +308,7 @@ app.post("/api/debug-pdf", upload.single("file"), async (req, res) => {
       size: req.file.size,
       textLength: rawText.length,
       preview: rawText.slice(0, 3000),
+      detectedItems: extractItems(rawText, 50),
     });
   } catch (error) {
     console.error("Error en /api/debug-pdf:", error);
@@ -397,6 +423,10 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
         requestedMaxItems,
         detectedItems: items.length,
         textPreview: rawText.slice(0, 3000),
+        mergedItemLines: String(rawText || "")
+          .split(/\r?\n/)
+          .map((l) => l.replace(/\s+/g, " ").trim())
+          .filter(Boolean),
       },
     });
   } catch (error) {
