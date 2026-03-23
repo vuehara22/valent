@@ -255,10 +255,21 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
       mimetype,
       size,
       requestedMaxItems,
+      hasBuffer: !!buffer,
+      bufferLength: buffer ? buffer.length : 0,
     });
 
-    const isPdf = mimetype === "application/pdf";
-    const isImage = mimetype.startsWith("image/");
+    const lowerName = String(originalname || "").toLowerCase();
+
+    const isPdf =
+      mimetype === "application/pdf" || lowerName.endsWith(".pdf");
+
+    const isImage =
+      String(mimetype || "").startsWith("image/") ||
+      lowerName.endsWith(".png") ||
+      lowerName.endsWith(".jpg") ||
+      lowerName.endsWith(".jpeg") ||
+      lowerName.endsWith(".webp");
 
     if (!isPdf && !isImage) {
       return res.status(400).json({
@@ -275,9 +286,35 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
       });
     }
 
+    if (!buffer || !buffer.length) {
+      return res.status(400).json({
+        ok: false,
+        error: "El archivo no contiene datos válidos.",
+      });
+    }
+
+    console.log("Antes de pdf-parse");
+
     const parsedPdf = await pdf(buffer);
+
+    console.log("Después de pdf-parse", {
+      numpages: parsedPdf?.numpages,
+      numrender: parsedPdf?.numrender,
+      info: parsedPdf?.info || null,
+      metadata: parsedPdf?.metadata ? "ok" : null,
+      textLength: parsedPdf?.text ? parsedPdf.text.length : 0,
+    });
+
     const rawText = parsedPdf?.text || "";
     const text = normalizeSpaces(rawText);
+
+    if (!rawText.trim()) {
+      return res.status(422).json({
+        ok: false,
+        error:
+          "El PDF no contiene texto legible para extraer. Puede ser un PDF escaneado o una imagen incrustada.",
+      });
+    }
 
     const remitoNro = extractRemitoNumero(text);
     const fecha = extractFecha(text);
@@ -326,7 +363,10 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Error en /api/parse-remito:", error);
+    console.error("Error en /api/parse-remito:");
+    console.error("message:", error?.message);
+    console.error("stack:", error?.stack);
+    console.error("full error:", error);
 
     return res.status(500).json({
       ok: false,
