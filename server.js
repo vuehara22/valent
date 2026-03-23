@@ -4,7 +4,8 @@ const multer = require("multer");
 const pdf = require("pdf-parse");
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 10000;
+const PDF_PARSE_TIMEOUT = 10000;
 
 console.log("Iniciando servidor...");
 
@@ -231,6 +232,19 @@ function extractItems(rawText, maxItems = 30) {
   return dedupeItems(items).filter(isValidParsedItem).slice(0, maxItems);
 }
 
+function parsePdfWithTimeout(buffer, timeout = PDF_PARSE_TIMEOUT) {
+  return Promise.race([
+    pdf(buffer),
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("PDF parse timeout")), timeout);
+    }),
+  ]);
+}
+
+app.get("/", (req, res) => {
+  res.status(200).send("OK");
+});
+
 app.get("/api/health", (req, res) => {
   return res.json({
     ok: true,
@@ -295,7 +309,7 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
 
     console.log("Antes de pdf-parse");
 
-    const parsedPdf = await pdf(buffer);
+    const parsedPdf = await parsePdfWithTimeout(buffer);
 
     console.log("Después de pdf-parse", {
       numpages: parsedPdf?.numpages,
@@ -367,6 +381,14 @@ app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
     console.error("message:", error?.message);
     console.error("stack:", error?.stack);
     console.error("full error:", error);
+
+    if (error?.message === "PDF parse timeout") {
+      return res.status(408).json({
+        ok: false,
+        error:
+          "El procesamiento del PDF tardó demasiado. Probá con otro archivo o con un PDF más liviano.",
+      });
+    }
 
     return res.status(500).json({
       ok: false,
