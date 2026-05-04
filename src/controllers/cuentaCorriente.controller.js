@@ -1,4 +1,4 @@
-import { pool } from "../db.js";
+import { pool } from "../config/db.js";
 
 function normalizeMovimiento(row) {
   return {
