@@ -1,35 +1,57 @@
-const express = require("express");
-const cors = require("cors");
-const multer = require("multer");
+import "dotenv/config";
 
-// IMPORTANTE: cargar worker antes de pdf-parse
-require("pdf-parse/worker");
-const { PDFParse } = require("pdf-parse");
+import express from "express";
+import cors from "cors";
+import multer from "multer";
+
+import "pdf-parse/worker";
+import { PDFParse } from "pdf-parse";
+
+import productosRoutes from "./src/routes/productos.routes.js";
+import clientesRoutes from "./src/routes/clientes.routes.js";
+import presupuestosRoutes from "./src/routes/presupuestos.routes.js";
+import pedidosRoutes from "./src/routes/pedidos.routes.js";
+import preferencesRoutes from "./src/routes/preferences.routes.js";
+import usuariosRoutes from "./src/routes/usuarios.routes.js";
+import cuentaCorrienteRoutes from "./src/routes/cuentaCorriente.routes.js";
 
 const app = express();
-const PORT = process.env.PORT || 10000;
-const PDF_PARSE_TIMEOUT = 10000;
-
-console.log("Iniciando servidor...");
+const PORT = process.env.PORT || 4000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 15 * 1024 * 1024,
-  },
+const upload = multer({ storage: multer.memoryStorage() });
+
+app.get("/", (_req, res) => {
+  res.json({
+    ok: true,
+    message: "VALENT backend funcionando con PostgreSQL",
+  });
 });
+
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    message: "API funcionando",
+    db: "postgresql",
+  });
+});
+
+app.use("/api/productos", productosRoutes);
+app.use("/api/clientes", clientesRoutes);
+app.use("/api/presupuestos", presupuestosRoutes);
+app.use("/api/pedidos", pedidosRoutes);
+app.use("/api/preferences", preferencesRoutes);
+app.use("/api/usuarios", usuariosRoutes);
+app.use("/api/cuenta-corriente", cuentaCorrienteRoutes);
 
 function normalizeSpaces(s) {
   return String(s || "").replace(/\s+/g, " ").trim();
 }
 
-function parseMoneyAR(value) {
-  if (!value) return 0;
-
-  const cleaned = String(value)
+function parseMoneyAR(s) {
+  const cleaned = String(s ?? "")
     .replace(/\./g, "")
     .replace(",", ".")
     .replace(/[^\d.-]/g, "");
@@ -38,428 +60,324 @@ function parseMoneyAR(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
-function parsePositiveInt(value, fallback) {
-  const n = Number.parseInt(String(value ?? "").trim(), 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-function getRequestedMaxItems(req) {
-  const candidates = [
-    req.body?.maxItems,
-    req.body?.max_items,
-    req.body?.itemLimit,
-    req.body?.limit,
-    req.body?.topK,
-    req.query?.maxItems,
-    req.query?.max_items,
-    req.query?.itemLimit,
-    req.query?.limit,
-    req.query?.topK,
+function extractNumero(text) {
+  const patterns = [
+    /N[°º]?:\s*([0-9]+)/i,
+    /Presupuesto\s*N[°º]?:?\s*([0-9]+)/i,
+    /Nro\.?\s*Presupuesto\s*:?\s*([0-9]+)/i,
   ];
 
-  for (const candidate of candidates) {
-    const parsed = Number.parseInt(String(candidate ?? "").trim(), 10);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m?.[1]) return m[1].trim();
   }
 
-  return 30;
-}
-
-function extractRemitoNumero(text) {
-  const m = text.match(/N[º°o]?:\s*([0-9]+)/i);
-  return m?.[1]?.trim() || "";
+  return "";
 }
 
 function extractFecha(text) {
-  const m = text.match(/Fecha:\s*(\d{2}\/\d{2}\/\d{4})/i);
-  return m?.[1]?.trim() || "";
+  const patterns = [
+    /Fecha:\s*(\d{2}\/\d{2}\/\d{4})/i,
+    /Fecha\s+(\d{2}\/\d{2}\/\d{4})/i,
+    /(\d{2}\/\d{2}\/\d{4})/,
+  ];
+
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m?.[1]) return m[1].trim();
+  }
+
+  return "";
 }
 
-function extractValidez(text) {
-  const m = text.match(/Validez:\s*(\d{2}\/\d{2}\/\d{4})/i);
-  return m?.[1]?.trim() || "";
-}
+function extractCliente(text) {
+  const patterns = [
+    /Raz[oó]n social:\s*(.+?)\s*Domicilio:/i,
+    /Cliente:\s*(.+?)\s*(Domicilio|CUIT|Condici[oó]n|Tel[eé]fono|$)/i,
+    /Señor(?:es)?:\s*(.+?)\s*(Domicilio|CUIT|Condici[oó]n|Tel[eé]fono|$)/i,
+  ];
 
-function extractCuit(text) {
-  const m = text.match(/CUIT:\s*([0-9]{11})/i);
-  return m?.[1]?.trim() || "";
-}
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m?.[1]) return normalizeSpaces(m[1]);
+  }
 
-function extractRazonSocial(text) {
-  const m = text.match(/Raz[oó]n social:\s*(.+?)\s*Domicilio:/i);
-  return m?.[1]?.trim() || "";
+  return "";
 }
 
 function extractDomicilio(text) {
-  const m = text.match(/Domicilio:\s*(.+?)\s*Ubicaci[oó]n:/i);
-  return m?.[1]?.trim() || "";
+  const m = text.match(/Domicilio:\s*(.+?)\s*(Localidad|Ubicaci[oó]n|CUIT|Tel[eé]fono|Condici[oó]n|$)/i);
+  return m?.[1] ? normalizeSpaces(m[1]) : "";
 }
 
-function extractUbicacion(text) {
-  const m = text.match(/Ubicaci[oó]n:\s*(.+?)\s*Condici[oó]n de venta:/i);
+function extractCuit(text) {
+  const m = text.match(/CUIT:?\s*([0-9\-]+)/i);
   return m?.[1]?.trim() || "";
 }
 
 function extractTelefono(text) {
-  const m = text.match(/Tel\.\s*:?\s*([0-9()+\-\s]+)/i);
-  return m?.[1]?.trim() || "";
+  const m = text.match(/Tel[eé]fono:?\s*([0-9\s\-()+]+)/i);
+  return m?.[1] ? normalizeSpaces(m[1]) : "";
 }
 
-function extractCondVenta(text) {
+function extractCondicionVenta(text) {
   const m = text.match(
-    /Condici[oó]n de venta:\s*(.+?)\s*Condici[oó]n de IVA:/i
+    /Condici[oó]n de venta:\s*(.+?)\s*(Condici[oó]n de IVA|IVA|CUIT|$)/i
   );
-  return m?.[1]?.trim() || "";
+  return m?.[1] ? normalizeSpaces(m[1]) : "";
 }
 
-function extractCondIva(text) {
-  const m = text.match(/Condici[oó]n de IVA:\s*(.+?)(?:Cantidad Código|$)/i);
-  return m?.[1]?.trim() || "";
+function extractCondicionIva(text) {
+  const m = text.match(/Condici[oó]n de IVA:\s*(.+?)\s*(Condici[oó]n de venta|CUIT|Detalle|$)/i);
+  return m?.[1] ? normalizeSpaces(m[1]) : "";
 }
 
-function sanitizeItem(item) {
+function mapEstadoPago(condVenta) {
+  const v = String(condVenta || "").toLowerCase();
+
+  if (v.includes("efectivo")) return "COBRADO";
+  if (v.includes("transfer")) return "COBRADO";
+  if (v.includes("mercado")) return "COBRADO";
+  if (v.includes("cuenta")) return "SALDO";
+  if (v.includes("adelanto") || v.includes("anticipo")) return "ADELANTO";
+
+  return "PENDIENTE";
+}
+
+function isBadItemLine(line) {
+  const l = normalizeSpaces(line).toLowerCase();
+
+  if (!l) return true;
+
+  const badStarts = [
+    "subtotal",
+    "total",
+    "iva",
+    "bonificacion",
+    "descuento",
+    "condicion",
+    "condición",
+    "fecha",
+    "domicilio",
+    "razon social",
+    "razón social",
+    "cliente",
+    "cuit",
+    "telefono",
+    "teléfono",
+    "presupuesto",
+    "remito",
+  ];
+
+  return badStarts.some((x) => l.startsWith(x));
+}
+
+function normalizeParsedItem(item) {
   return {
-    cantidad: Math.max(1, parsePositiveInt(item?.cantidad, 1)),
-    codigo: normalizeSpaces(item?.codigo),
-    descripcion: normalizeSpaces(item?.descripcion),
-    precioUnitario: Math.max(0, parseMoneyAR(item?.precioUnitario)),
-    ivaPct: Math.max(0, parseMoneyAR(item?.ivaPct)),
-    bonifPct: Math.max(0, parseMoneyAR(item?.bonifPct)),
+    cantidad: Math.max(1, Number(item.cantidad) || 1),
+    codigo: String(item.codigo || "").trim(),
+    descripcion: normalizeSpaces(item.descripcion || ""),
+    precioUnitario: Math.max(0, Number(item.precioUnitario) || 0),
+    ivaPct: Math.max(0, Number(item.ivaPct) || 0),
+    bonifPct: Math.max(0, Number(item.bonifPct) || 0),
   };
 }
 
-function isValidParsedItem(item) {
-  if (!item) return false;
-
-  const codigo = normalizeSpaces(item.codigo);
-  const descripcion = normalizeSpaces(item.descripcion);
-  const cantidad = Number(item.cantidad) || 0;
-  const precioUnitario = Number(item.precioUnitario) || 0;
-
-  if (!codigo && !descripcion && cantidad <= 0 && precioUnitario <= 0) {
-    return false;
-  }
-
-  const lowerDescripcion = descripcion.toLowerCase();
-  const lowerCodigo = codigo.toLowerCase();
-
-  if (
-    lowerDescripcion.startsWith("autocompletado desde archivo") ||
-    lowerDescripcion.endsWith(".pdf") ||
-    lowerDescripcion.endsWith(".png") ||
-    lowerDescripcion.endsWith(".jpg") ||
-    lowerDescripcion.endsWith(".jpeg") ||
-    lowerCodigo === "cantidad" ||
-    lowerCodigo === "codigo" ||
-    lowerDescripcion.includes("razón social") ||
-    lowerDescripcion.includes("condición de iva") ||
-    lowerDescripcion.includes("condicion de iva")
-  ) {
-    return false;
-  }
-
-  return true;
-}
-
-function dedupeItems(items) {
-  const seen = new Set();
-  const out = [];
-
-  for (const item of items) {
-    const key = [
-      Number(item.cantidad) || 0,
-      normalizeSpaces(item.codigo).toLowerCase(),
-      normalizeSpaces(item.descripcion).toLowerCase(),
-      Number(item.precioUnitario) || 0,
-    ].join("|");
-
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(item);
-  }
-
-  return out;
-}
-
-function extractItems(rawText, maxItems = 30) {
-  const originalLines = String(rawText || "")
-    .split(/\r?\n/)
-    .map((l) => l.replace(/\s+/g, " ").trim())
-    .filter(Boolean);
-
-  const mergedLines = [];
-  let current = "";
-
-  for (const line of originalLines) {
-    const startsLikeItem = /^\d+\s+[A-Z0-9]/i.test(line);
-
-    if (startsLikeItem) {
-      if (current) mergedLines.push(current);
-      current = line;
-    } else if (current) {
-      current += " " + line;
-    }
-  }
-
-  if (current) mergedLines.push(current);
-
+function extractItemsFromLines(rawText) {
   const items = [];
 
-  for (const line of mergedLines) {
-    if (items.length >= maxItems) break;
+  const lines = String(rawText || "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
 
-    const startMatch = line.match(/^(\d+)\s+([A-Z0-9][A-Z0-9\-/.]*)\s+(.+)$/i);
-    if (!startMatch) continue;
+  for (const line of lines) {
+    if (isBadItemLine(line)) continue;
 
-    const cantidad = parsePositiveInt(startMatch[1], 1);
-    const codigo = normalizeSpaces(startMatch[2]);
-    const resto = normalizeSpaces(startMatch[3]);
-
-    const moneyMatches = [...resto.matchAll(/\d{1,3}(?:\.\d{3})*,\d{2}/g)].map(
-      (m) => m[0]
+    let m = line.match(
+      /^(\d+(?:[.,]\d+)?)\s+([A-Z0-9][A-Z0-9\-\/.]*)\s+(.+?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})(?:\s+.*)?$/i
     );
 
-    if (!moneyMatches.length) continue;
+    if (m) {
+      items.push(
+        normalizeParsedItem({
+          cantidad: parseMoneyAR(m[1]),
+          codigo: m[2],
+          descripcion: m[3],
+          precioUnitario: parseMoneyAR(m[4]),
+        })
+      );
+      continue;
+    }
 
-    const precioUnitario = parseMoneyAR(moneyMatches[0]);
-
-    const pctMatches = [...resto.matchAll(/(\d{1,3}(?:,\d{2})?)\s*%/g)].map(
-      (m) => m[1]
+    m = line.match(
+      /^([A-Z0-9][A-Z0-9\-\/.]*)\s+(.+?)\s+(\d+(?:[.,]\d+)?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})(?:\s+.*)?$/i
     );
 
-    const ivaPct = pctMatches[0] ? parseMoneyAR(pctMatches[0]) : 0;
-    const bonifPct = pctMatches[1] ? parseMoneyAR(pctMatches[1]) : 0;
-
-    const firstMoneyIndex = resto.search(/\d{1,3}(?:\.\d{3})*,\d{2}/);
-    let descripcion =
-      firstMoneyIndex > 0 ? resto.slice(0, firstMoneyIndex).trim() : resto;
-
-    descripcion = normalizeSpaces(descripcion);
-
-    const item = sanitizeItem({
-      cantidad,
-      codigo,
-      descripcion,
-      precioUnitario,
-      ivaPct,
-      bonifPct,
-    });
-
-    if (isValidParsedItem(item)) {
-      items.push(item);
+    if (m) {
+      items.push(
+        normalizeParsedItem({
+          cantidad: parseMoneyAR(m[3]),
+          codigo: m[1],
+          descripcion: m[2],
+          precioUnitario: parseMoneyAR(m[4]),
+        })
+      );
+      continue;
     }
   }
 
-  return dedupeItems(items).filter(isValidParsedItem).slice(0, maxItems);
+  return items;
 }
 
-async function parsePdfWithTimeout(buffer, timeout = PDF_PARSE_TIMEOUT) {
-  let parser = null;
+function extractItemsFallback(rawText) {
+  const lines = String(rawText || "")
+    .split("\n")
+    .map((l) => normalizeSpaces(l))
+    .filter(Boolean)
+    .filter((l) => !isBadItemLine(l));
 
-  try {
-    parser = new PDFParse({ data: buffer });
+  return lines
+    .slice(0, 30)
+    .map((line) => {
+      const codeMatch = line.match(/\b([A-Z]{1,5}[-/]?[0-9]{1,8}|[0-9]{3,})\b/i);
+      const priceMatch = line.match(/(\d{1,3}(?:\.\d{3})*,\d{2})/);
 
-    const result = await Promise.race([
-      parser.getText(),
-      new Promise((_, reject) => {
-        setTimeout(() => reject(new Error("PDF parse timeout")), timeout);
-      }),
-    ]);
-
-    return result;
-  } finally {
-    try {
-      if (parser && typeof parser.destroy === "function") {
-        await parser.destroy();
-      }
-    } catch (destroyError) {
-      console.error("Error destruyendo parser:", destroyError);
-    }
-  }
-}
-
-app.get("/", (req, res) => {
-  res.status(200).send("OK");
-});
-
-app.get("/api/health", (req, res) => {
-  return res.json({
-    ok: true,
-    message: "Backend funcionando",
-  });
-});
-
-app.post("/api/debug-pdf", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file?.buffer) {
-      return res.status(400).json({
-        ok: false,
-        error: "Sin archivo",
+      return normalizeParsedItem({
+        cantidad: 1,
+        codigo: codeMatch?.[1] || "",
+        descripcion: line,
+        precioUnitario: priceMatch ? parseMoneyAR(priceMatch[1]) : 0,
       });
-    }
+    })
+    .filter((x) => x.codigo || x.descripcion);
+}
 
-    const parsedPdf = await parsePdfWithTimeout(req.file.buffer);
-    const rawText = parsedPdf?.text || "";
+function extractItems(text) {
+  const items = extractItemsFromLines(text);
 
-    return res.json({
-      ok: true,
-      originalname: req.file.originalname,
-      mimetype: req.file.mimetype,
-      size: req.file.size,
-      textLength: rawText.length,
-      preview: rawText.slice(0, 3000),
-      detectedItems: extractItems(rawText, 50),
-    });
-  } catch (error) {
-    console.error("Error en /api/debug-pdf:", error);
+  if (items.length) return items;
 
-    return res.status(500).json({
-      ok: false,
-      error: error?.message || String(error),
-      stack: error?.stack || null,
-    });
-  }
-});
+  return extractItemsFallback(text);
+}
 
 app.post("/api/parse-remito", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({
-        ok: false,
-        error: "No se recibió ningún archivo en el campo 'file'.",
-      });
+      return res.status(400).json({ error: "No se recibió archivo" });
     }
 
-    const { originalname, mimetype, size, buffer } = req.file;
-    const requestedMaxItems = getRequestedMaxItems(req);
+    const pdf = new PDFParse({ data: req.file.buffer });
+    const result = await pdf.getText();
 
-    console.log("Archivo recibido:", {
-      originalname,
-      mimetype,
-      size,
-      requestedMaxItems,
-      hasBuffer: !!buffer,
-      bufferLength: buffer ? buffer.length : 0,
-    });
-
-    const lowerName = String(originalname || "").toLowerCase();
-    const isPdf =
-      mimetype === "application/pdf" || lowerName.endsWith(".pdf");
-
-    if (!isPdf) {
-      return res.status(400).json({
-        ok: false,
-        error: "Formato no soportado. Subí un PDF.",
-      });
-    }
-
-    if (!buffer || !buffer.length) {
-      return res.status(400).json({
-        ok: false,
-        error: "El archivo no contiene datos válidos.",
-      });
-    }
-
-    console.log("Antes de pdf-parse");
-
-    const parsedPdf = await parsePdfWithTimeout(buffer);
-
-    console.log("Después de pdf-parse", {
-      textLength: parsedPdf?.text ? parsedPdf.text.length : 0,
-    });
-
-    const rawText = parsedPdf?.text || "";
+    const rawText = result.text || "";
     const text = normalizeSpaces(rawText);
 
-    if (!rawText.trim()) {
-      return res.status(422).json({
-        ok: false,
-        error:
-          "El PDF no contiene texto legible para extraer. Puede ser escaneado.",
-      });
-    }
-
-    const remitoNro = extractRemitoNumero(text);
+    const remitoNumero = extractNumero(text);
     const fecha = extractFecha(text);
-    const validez = extractValidez(text);
-    const cuit = extractCuit(text);
-    const razonSocial = extractRazonSocial(text);
-    const domicilio = extractDomicilio(text);
-    const ubicacion = extractUbicacion(text);
-    const telefono = extractTelefono(text);
-    const condVenta = extractCondVenta(text);
-    const condIva = extractCondIva(text);
-    const items = extractItems(rawText, requestedMaxItems);
+    const cliente = extractCliente(text);
+    const condicionVenta = extractCondicionVenta(text);
+    const estadoPago = mapEstadoPago(condicionVenta);
+    const items = extractItems(rawText);
 
     const warnings = [];
-    if (!remitoNro) warnings.push("No detecté el número.");
-    if (!fecha) warnings.push("No detecté la fecha.");
-    if (!razonSocial) warnings.push("No detecté la razón social.");
-    if (!items.length) warnings.push("No detecté ítems automáticamente.");
 
-    return res.json({
+    if (!cliente) warnings.push("No detecté Cliente automáticamente.");
+    if (!fecha) warnings.push("No detecté Fecha automáticamente.");
+    if (!remitoNumero) warnings.push("No detecté Nº automáticamente.");
+    if (!items.length) warnings.push("No detecté productos automáticamente.");
+
+    res.json({
       ok: true,
-      source: {
-        originalname,
-        mimetype,
-        size,
-      },
       parsed: {
-        remitoNro,
+        numero: remitoNumero,
+        remitoNro: remitoNumero,
         fecha,
-        validez,
-        cuit,
-        razonSocial,
-        domicilio,
-        ubicacion,
-        telefono,
-        condVenta,
-        condIva,
-        detalle: `Autocompletado desde archivo: ${originalname}`,
+        cliente,
+        razonSocial: cliente,
+        domicilio: extractDomicilio(text),
+        cuit: extractCuit(text),
+        telefono: extractTelefono(text),
+        condVenta: condicionVenta,
+        condicionVenta,
+        condIva: extractCondicionIva(text),
+        sector: "VENTAS",
+        detalle: "",
+        estadoPago,
         items,
-      },
-      warnings,
-      debug: {
-        requestedMaxItems,
-        detectedItems: items.length,
-        textPreview: rawText.slice(0, 3000),
-        mergedItemLines: String(rawText || "")
-          .split(/\r?\n/)
-          .map((l) => l.replace(/\s+/g, " ").trim())
-          .filter(Boolean),
+        warnings,
       },
     });
   } catch (error) {
-    console.error("Error en /api/parse-remito:");
-    console.error("message:", error?.message);
-    console.error("stack:", error?.stack);
-    console.error("full error:", error);
+    console.error("Error parseando remito:", error);
 
-    if (error?.message === "PDF parse timeout") {
-      return res.status(408).json({
-        ok: false,
-        error:
-          "El procesamiento del PDF tardó demasiado. Probá con otro archivo o con un PDF más liviano.",
-      });
-    }
-
-    return res.status(500).json({
-      ok: false,
-      error: "Error interno del servidor al procesar el archivo.",
-      detail: error?.message || String(error),
-      stack: error?.stack || null,
+    res.status(500).json({
+      error: "Error parseando remito",
+      detail: error.message,
     });
   }
 });
 
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught Exception:", err);
+app.post("/api/parse-presupuesto", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No se recibió archivo" });
+    }
+
+    const pdf = new PDFParse({ data: req.file.buffer });
+    const result = await pdf.getText();
+
+    const rawText = result.text || "";
+    const text = normalizeSpaces(rawText);
+
+    const numero = extractNumero(text);
+    const fecha = extractFecha(text);
+    const cliente = extractCliente(text);
+    const domicilio = extractDomicilio(text);
+    const cuit = extractCuit(text);
+    const telefono = extractTelefono(text);
+    const condVenta = extractCondicionVenta(text);
+    const condIva = extractCondicionIva(text);
+    const items = extractItems(rawText);
+
+    const warnings = [];
+
+    if (!cliente) warnings.push("No detecté Cliente automáticamente.");
+    if (!fecha) warnings.push("No detecté Fecha automáticamente.");
+    if (!numero) warnings.push("No detecté Nº de presupuesto automáticamente.");
+    if (!items.length) warnings.push("No detecté productos automáticamente.");
+
+    res.json({
+      ok: true,
+      parsed: {
+        numero,
+        remitoNro: numero,
+        fecha,
+        validez: "",
+        cuit,
+        razonSocial: cliente,
+        cliente,
+        domicilio,
+        ubicacion: "",
+        telefono,
+        condVenta,
+        condicionVenta: condVenta,
+        condIva,
+        detalle: "",
+        items,
+        warnings,
+      },
+    });
+  } catch (error) {
+    console.error("Error parseando presupuesto:", error);
+
+    res.status(500).json({
+      error: "Error parseando presupuesto",
+      detail: error.message,
+    });
+  }
 });
 
-process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled Rejection:", reason);
-});
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor escuchando en puerto ${PORT}`);
+app.listen(PORT, () => {
+  console.log(`SERVER OK ${PORT}`);
 });
