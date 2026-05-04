@@ -1,33 +1,30 @@
-import pkg from "pg";
-import dotenv from "dotenv";
-import path from "path";
-import { fileURLToPath } from "url";
+import pg from "pg";
+import "dotenv/config";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const { Pool } = pg;
 
-// Carga explícita del .env de /server ANTES de crear el Pool
-dotenv.config({
-  path: path.join(__dirname, "..", ".env"),
-  override: true,
+const isRender = !!process.env.DATABASE_URL;
+
+export const pool = new Pool({
+  // 👉 Si está en Render usa DATABASE_URL
+  connectionString: isRender ? process.env.DATABASE_URL : undefined,
+
+  // 👉 Si está en local usa tus variables
+  host: isRender ? undefined : process.env.DB_HOST || "localhost",
+  port: isRender ? undefined : Number(process.env.DB_PORT || 5432),
+  database: isRender ? undefined : process.env.DB_NAME || "valent_db",
+  user: isRender ? undefined : process.env.DB_USER || "postgres",
+  password: isRender ? undefined : process.env.DB_PASSWORD,
+
+  // 👉 IMPORTANTE para Render (SSL)
+  ssl: isRender ? { rejectUnauthorized: false } : false,
 });
 
-const { Pool } = pkg;
-
-const pool = new Pool({
-  host: process.env.DB_HOST || "localhost",
-  port: Number(process.env.DB_PORT || 5432),
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-  password: String(process.env.DB_PASSWORD ?? ""),
-});
-
+// opcional pero MUY útil para debug
 pool.on("connect", () => {
-  console.log("✅ PostgreSQL conectado");
+  console.log("🟢 Conectado a PostgreSQL");
 });
 
 pool.on("error", (err) => {
-  console.error("❌ Error de PostgreSQL:", err);
+  console.error("🔴 Error en PostgreSQL:", err);
 });
-
-export default pool;
