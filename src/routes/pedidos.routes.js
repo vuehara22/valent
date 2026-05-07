@@ -24,9 +24,10 @@ function normalizePedidoBody(body) {
     sector: String(body.sector || "").trim(),
     prioridad: String(body.prioridad || "OK").trim(),
     dias: Number(body.dias) || 0,
-    estados: Array.isArray(body.estados) && body.estados.length > 0
-      ? body.estados
-      : ["PENDIENTE"],
+    estados:
+      Array.isArray(body.estados) && body.estados.length > 0
+        ? body.estados
+        : ["PENDIENTE"],
     extras: body.extras && typeof body.extras === "object" ? body.extras : {},
     fecha: body.fecha || new Date().toISOString(),
   };
@@ -177,9 +178,18 @@ router.delete("/:id", async (req, res) => {
 
     const result = await pool.query(
       `
-      DELETE FROM pedidos
+      UPDATE pedidos
+      SET
+        estados = COALESCE(estados, '[]'::jsonb) || '["CANCELADO"]'::jsonb,
+        extras = jsonb_set(
+          COALESCE(extras, '{}'::jsonb),
+          '{canceladoAt}',
+          to_jsonb(NOW()::text),
+          true
+        ),
+        updated_at = NOW()
       WHERE id = $1
-      RETURNING id
+      RETURNING *
       `,
       [id]
     );
@@ -188,10 +198,10 @@ router.delete("/:id", async (req, res) => {
       return res.status(404).json({ message: "Pedido no encontrado" });
     }
 
-    res.json({ ok: true, id });
+    res.json({ ok: true, pedido: mapPedido(result.rows[0]) });
   } catch (error) {
     console.error("Error DELETE /api/pedidos/:id:", error);
-    res.status(500).json({ message: "Error al eliminar pedido" });
+    res.status(500).json({ message: "Error al cancelar pedido" });
   }
 });
 

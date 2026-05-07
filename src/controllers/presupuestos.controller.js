@@ -221,51 +221,290 @@ export async function actualizarPresupuesto(req, res) {
 }
 
 export async function aprobarPresupuesto(req, res) {
+  const client = await pool.connect();
+
   try {
     const { id } = req.params;
-    const { pedidoGeneradoId } = req.body;
 
-    const result = await pool.query(
+    await client.query("BEGIN");
+
+    // =========================
+    // BLOQUEAR PRESUPUESTO
+    // =========================
+    const pres = await client.query(
+      `
+      SELECT *
+      FROM presupuestos
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [id]
+    );
+
+    if (!pres.rows.length) {
+      await client.query("ROLLBACK");
+
+      return res.status(404).json({
+        error: "Presupuesto no encontrado",
+      });
+    }
+
+    const p = pres.rows[0];
+
+    // =========================
+    // YA APROBADO
+    // =========================
+    if (p.aprobado && p.pedido_generado_id) {
+      await client.query("COMMIT");
+      return res.json(mapPresupuesto(p));
+    }
+
+    // =========================
+    // BUSCAR PEDIDO EXISTENTE
+    // EVITA DUPLICADOS REALES
+    // =========================
+    const existingPedido = await client.query(
+      `
+      SELECT *
+      FROM pedidos
+      WHERE extras->>'presupuestoId' = $1
+      LIMIT 1
+      `,
+      [id]
+    );
+
+    let pedidoId = null;
+
+    // =========================
+    // SI YA EXISTE
+    // =========================
+    if (existingPedido.rows.length) {
+      pedidoId = existingPedido.rows[0].id;
+    } else {
+      // =========================
+      // NORMALIZAR SECTORES
+      // =========================
+      const sectoresAsignados = Array.isArray(p.sectores_asignados)
+        ? [...new Set(p.sectores_asignados)]
+        : [];
+
+      const sectorPrincipal =
+        sectoresAsignados[0] || p.sector || "plastico";
+
+      // =========================
+      // ESTADOS CON TIMESTAMP
+      // =========================
+      const estadosIniciales = [
+        {
+          estado: "PENDIENTE",
+          at: new Date().toISOString(),
+        },
+      ];
+
+      // =========================
+      // CREAR PEDIDO
+      // =========================
+      const pedidoInsert = await client.query(
+        `
+        INSERT INTO pedidos (
+          cliente,
+          sector,
+          prioridad,
+          dias,
+          estados,
+          extras,
+          fecha,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5::jsonb,
+          $6::jsonb,
+          $7,
+          NOW(),
+          NOW()
+        )
+        RETURNING *
+        `,
+        [
+          p.cliente || "Sin cliente",
+
+          // compatibilidad visual actual
+          sectorPrincipal,
+
+          p.prioridad || "OK",
+
+          Number(p.dias || 0),
+
+          JSON.stringify(estadosIniciales),
+
+          JSON.stringify({
+            origen: "PRESUPUESTO",
+
+            presupuestoId: p.id,
+
+            clienteId: p.cliente_id || null,
+
+            sectoresAsignados,
+
+            stockDescontado: true,
+
+            stockDescontadoAt: new Date().toISOString(),
+
+            presupuesto: {
+              id: p.id,
+
+              numero: p.numero || "",
+
+              fecha: p.fecha || "",
+
+              validez: p.validez || "",
+
+              cuit: p.cuit || "",
+
+              domicilio: p.domicilio || "",
+
+              ubicacion: p.ubicacion || "",
+
+              telefono: p.telefono || "",
+
+              condVenta: p.cond_venta || "",
+
+              condIva: p.cond_iva || "",
+
+              detalle: p.detalle || "",
+
+              cliente: p.cliente || "",
+
+              estado: "APROBADO",
+
+              items: Array.isArray(p.items)
+                ? p.items
+                : [],
+
+              totals:
+                p.totals || {
+                  subtotal: 0,
+                  iva: 0,
+                  total: 0,
+                },
+            },
+          }),
+
+          new Date().toISOString(),
+        ]
+      );
+
+      pedidoId = pedidoInsert.rows[0].id;
+    }
+
+    // =========================
+    // ACTUALIZAR PRESUPUESTO
+    // =========================
+    const result = await client.query(
       `
       UPDATE presupuestos
-      SET aprobado = TRUE,
-          estado = 'APROBADO',
-          aprobado_at = NOW(),
-          pedido_generado_id = $1,
-          updated_at = NOW()
+      SET
+        aprobado = TRUE,
+        estado = 'APROBADO',
+        aprobado_at = NOW(),
+        pedido_generado_id = $1,
+        updated_at = NOW()
       WHERE id = $2
       RETURNING *
       `,
-      [pedidoGeneradoId || null, id]
+      [pedidoId, id]
     );
 
-    if (!result.rows.length) {
-      return res.status(404).json({ error: "Presupuesto no encontrado" });
-    }
+    await client.query("COMMIT");
 
-    res.json(mapPresupuesto(result.rows[0]));
+    return res.json(mapPresupuesto(result.rows[0]));
   } catch (error) {
-    console.error("Error al aprobar presupuesto:", error);
-    res.status(500).json({ error: "Error al aprobar presupuesto" });
+    await client.query("ROLLBACK");
+
+    console.error(
+      "Error al aprobar presupuesto:",
+      error
+    );
+
+    return res.status(500).json({
+      error: "Error al aprobar presupuesto",
+    });
+  } finally {
+    client.release();
   }
 }
 
 export async function eliminarPresupuesto(req, res) {
+  const client = await pool.connect();
+
   try {
     const { id } = req.params;
 
-    const result = await pool.query(
-      `DELETE FROM presupuestos WHERE id = $1 RETURNING *`,
+    await client.query("BEGIN");
+
+    const pres = await client.query(
+      `
+      SELECT *
+      FROM presupuestos
+      WHERE id = $1
+      FOR UPDATE
+      `,
       [id]
     );
 
-    if (!result.rows.length) {
+    if (!pres.rows.length) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Presupuesto no encontrado" });
     }
 
-    res.json({ ok: true, presupuesto: mapPresupuesto(result.rows[0]) });
+    const presupuesto = pres.rows[0];
+    const pedidoId = presupuesto.pedido_generado_id;
+
+    if (pedidoId) {
+      await client.query(
+        `
+        UPDATE pedidos
+        SET
+          estados = COALESCE(estados, '[]'::jsonb) || '["CANCELADO"]'::jsonb,
+          extras = jsonb_set(
+            COALESCE(extras, '{}'::jsonb),
+            '{canceladoPorPresupuestoId}',
+            to_jsonb($1::text),
+            true
+          ),
+          updated_at = NOW()
+        WHERE id = $2
+        `,
+        [id, pedidoId]
+      );
+    }
+
+    const result = await client.query(
+      `
+      DELETE FROM presupuestos
+      WHERE id = $1
+      RETURNING *
+      `,
+      [id]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({
+      ok: true,
+      presupuesto: mapPresupuesto(result.rows[0]),
+      pedidoCanceladoId: pedidoId || null,
+    });
   } catch (error) {
+    await client.query("ROLLBACK");
     console.error("Error al eliminar presupuesto:", error);
     res.status(500).json({ error: "Error al eliminar presupuesto" });
+  } finally {
+    client.release();
   }
 }

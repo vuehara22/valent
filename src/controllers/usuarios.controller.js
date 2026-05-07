@@ -1,25 +1,128 @@
 import { pool } from "../config/db.js";
 
+function normalizeRole(value) {
+  const raw = String(value || "LECTURA").trim().toUpperCase();
+
+  const allowed = ["SUPER_ADMIN", "ADMIN", "VENTAS", "OPERARIO", "LECTURA"];
+
+  if (allowed.includes(raw)) return raw;
+
+  if (raw === "SUPERADMIN") return "SUPER_ADMIN";
+  if (raw === "READONLY") return "LECTURA";
+  if (raw === "USER") return "LECTURA";
+
+  return "LECTURA";
+}
+
+function normalizeActivo(value) {
+  if (value === undefined || value === null) return true;
+  if (typeof value === "boolean") return value;
+
+  const raw = String(value).trim().toLowerCase();
+  return !["false", "0", "no", "inactivo", "inactive"].includes(raw);
+}
+
+function normalizePermissions(value) {
+  if (!value) return {};
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  return typeof value === "object" ? value : {};
+}
+
 function normalizeUsuario(row) {
+  const role = normalizeRole(row.role ?? row.rol);
+
   return {
     id: String(row.id),
-    nombre: row.nombre,
-    email: row.email,
-    password: row.password,
-    role: row.role,
-    activo: row.activo,
+    nombre: row.nombre || "",
+    email: row.email || "",
+    password: row.password || "",
+    role,
+    rol: role,
+    activo: normalizeActivo(row.activo),
+    estado: normalizeActivo(row.activo) ? "ACTIVO" : "INACTIVO",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    permissions: row.permissions || {},
+    permissions: normalizePermissions(row.permissions),
+    permisos: normalizePermissions(row.permissions),
   };
 }
 
-export async function getUsuarios(req, res) {
+function getBodyRole(body) {
+  return normalizeRole(body.role ?? body.rol);
+}
+
+function getBodyPermissions(body) {
+  return normalizePermissions(body.permissions ?? body.permisos);
+}
+
+async function ensureUsuariosTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS usuarios (
+      id SERIAL PRIMARY KEY,
+      nombre TEXT NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password TEXT,
+      role TEXT NOT NULL DEFAULT 'LECTURA',
+      activo BOOLEAN NOT NULL DEFAULT TRUE,
+      permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`
+    ALTER TABLE usuarios
+    ADD COLUMN IF NOT EXISTS password TEXT
+  `);
+
+  await pool.query(`
+    ALTER TABLE usuarios
+    ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'LECTURA'
+  `);
+
+  await pool.query(`
+    ALTER TABLE usuarios
+    ADD COLUMN IF NOT EXISTS activo BOOLEAN NOT NULL DEFAULT TRUE
+  `);
+
+  await pool.query(`
+    ALTER TABLE usuarios
+    ADD COLUMN IF NOT EXISTS permissions JSONB NOT NULL DEFAULT '{}'::jsonb
+  `);
+
+  await pool.query(`
+    ALTER TABLE usuarios
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()
+  `);
+
+  await pool.query(`
+    ALTER TABLE usuarios
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS usuarios_email_unique_idx
+    ON usuarios (LOWER(email))
+  `);
+}
+
+export async function getUsuarios(_req, res) {
   try {
+    await ensureUsuariosTable();
+
     const result = await pool.query(`
       SELECT *
       FROM usuarios
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
     `);
 
     res.json({
@@ -38,19 +141,36 @@ export async function getUsuarios(req, res) {
 
 export async function createUsuario(req, res) {
   try {
-    const {
-      nombre,
-      email,
-      password,
-      role,
-      activo = true,
-      permissions = {},
-    } = req.body;
+    await ensureUsuariosTable();
 
-    if (!nombre || !email || !password || !role) {
+    const nombre = String(req.body.nombre || "").trim();
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const password = String(req.body.password || req.body.contrasena || "").trim();
+    const role = getBodyRole(req.body);
+    const activo = normalizeActivo(req.body.activo ?? req.body.estado);
+    const permissions = getBodyPermissions(req.body);
+
+    if (!nombre || !email) {
       return res.status(400).json({
         ok: false,
-        error: "Faltan datos obligatorios",
+        error: "Nombre y email son obligatorios",
+      });
+    }
+
+    const existing = await pool.query(
+      `
+      SELECT id
+      FROM usuarios
+      WHERE LOWER(email) = LOWER($1)
+      LIMIT 1
+      `,
+      [email]
+    );
+
+    if (existing.rowCount > 0) {
+      return res.status(409).json({
+        ok: false,
+        error: "Ya existe un usuario con ese email",
       });
     }
 
@@ -70,11 +190,11 @@ export async function createUsuario(req, res) {
       RETURNING *
       `,
       [
-        nombre.trim(),
-        email.trim().toLowerCase(),
-        password,
+        nombre,
+        email,
+        password || null,
         role,
-        Boolean(activo),
+        activo,
         JSON.stringify(permissions),
       ]
     );
@@ -103,26 +223,30 @@ export async function createUsuario(req, res) {
 
 export async function updateUsuario(req, res) {
   try {
+    await ensureUsuariosTable();
+
     const { id } = req.params;
 
-    const {
-      nombre,
-      email,
-      password,
-      role,
-      activo = true,
-      permissions = {},
-    } = req.body;
+    const nombre = String(req.body.nombre || "").trim();
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const password = String(req.body.password || req.body.contrasena || "").trim();
+    const role = getBodyRole(req.body);
+    const activo = normalizeActivo(req.body.activo ?? req.body.estado);
+    const permissions = getBodyPermissions(req.body);
 
-    if (!nombre || !email || !role) {
+    if (!nombre || !email) {
       return res.status(400).json({
         ok: false,
-        error: "Faltan datos obligatorios",
+        error: "Nombre y email son obligatorios",
       });
     }
 
     const current = await pool.query(
-      `SELECT * FROM usuarios WHERE id = $1`,
+      `
+      SELECT *
+      FROM usuarios
+      WHERE id = $1
+      `,
       [id]
     );
 
@@ -133,7 +257,25 @@ export async function updateUsuario(req, res) {
       });
     }
 
-    const finalPassword = password || current.rows[0].password;
+    const emailUsed = await pool.query(
+      `
+      SELECT id
+      FROM usuarios
+      WHERE LOWER(email) = LOWER($1)
+        AND id::text <> $2::text
+      LIMIT 1
+      `,
+      [email, String(id)]
+    );
+
+    if (emailUsed.rowCount > 0) {
+      return res.status(409).json({
+        ok: false,
+        error: "Ya existe otro usuario con ese email",
+      });
+    }
+
+    const finalPassword = password || current.rows[0].password || null;
 
     const result = await pool.query(
       `
@@ -150,11 +292,11 @@ export async function updateUsuario(req, res) {
       RETURNING *
       `,
       [
-        nombre.trim(),
-        email.trim().toLowerCase(),
+        nombre,
+        email,
         finalPassword,
         role,
-        Boolean(activo),
+        activo,
         JSON.stringify(permissions),
         id,
       ]
@@ -184,17 +326,26 @@ export async function updateUsuario(req, res) {
 
 export async function deleteUsuario(req, res) {
   try {
+    await ensureUsuariosTable();
+
     const { id } = req.params;
 
-    if (String(id) === "1") {
+    const count = await pool.query(`SELECT COUNT(*)::int AS total FROM usuarios`);
+    const total = Number(count.rows[0]?.total || 0);
+
+    if (total <= 1) {
       return res.status(400).json({
         ok: false,
-        error: "No se puede eliminar el usuario administrador inicial",
+        error: "No se puede eliminar el único usuario del sistema",
       });
     }
 
     const result = await pool.query(
-      `DELETE FROM usuarios WHERE id = $1 RETURNING *`,
+      `
+      DELETE FROM usuarios
+      WHERE id = $1
+      RETURNING *
+      `,
       [id]
     );
 
@@ -208,6 +359,7 @@ export async function deleteUsuario(req, res) {
     res.json({
       ok: true,
       deleted: true,
+      usuario: normalizeUsuario(result.rows[0]),
     });
   } catch (error) {
     console.error("Error eliminando usuario:", error);

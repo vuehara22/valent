@@ -4,6 +4,7 @@ import {
   getProductoById,
   crearProducto,
   actualizarProducto,
+  patchProducto,
   eliminarProducto,
 } from "../controllers/productos.controller.js";
 
@@ -13,6 +14,7 @@ router.get("/", getProductos);
 router.get("/:id", getProductoById);
 router.post("/", crearProducto);
 router.put("/:id", actualizarProducto);
+router.patch("/:id", patchProducto);
 router.delete("/:id", eliminarProducto);
 
 export default router;
