@@ -114,7 +114,66 @@ async function ensureUsuariosTable() {
     ON usuarios (LOWER(email))
   `);
 }
+export async function loginUsuario(req, res) {
+  try {
+    await ensureUsuariosTable();
 
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const password = String(req.body.password || "").trim();
+
+    if (!email || !password) {
+      return res.status(400).json({
+        ok: false,
+        error: "Email y contraseña son obligatorios",
+      });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM usuarios
+      WHERE LOWER(email) = LOWER($1)
+      LIMIT 1
+      `,
+      [email]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(401).json({
+        ok: false,
+        error: "Usuario o contraseña incorrectos",
+      });
+    }
+
+    const usuario = result.rows[0];
+
+    if (String(usuario.password || "") !== password) {
+      return res.status(401).json({
+        ok: false,
+        error: "Usuario o contraseña incorrectos",
+      });
+    }
+
+    if (!normalizeActivo(usuario.activo)) {
+      return res.status(403).json({
+        ok: false,
+        error: "El usuario está inactivo",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      usuario: normalizeUsuario(usuario),
+    });
+  } catch (error) {
+    console.error("Error login usuario:", error);
+    res.status(500).json({
+      ok: false,
+      error: "Error iniciando sesión",
+      detail: error.message,
+    });
+  }
+}
 export async function getUsuarios(_req, res) {
   try {
     await ensureUsuariosTable();
