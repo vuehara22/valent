@@ -32,6 +32,16 @@ function mapPresupuesto(row) {
     detalle: row.detalle || "",
     items: row.items || [],
     totals: row.totals || { subtotal: 0, iva: 0, total: 0 },
+    notaEnvio:
+  row.nota_envio || {
+    optica: "",
+    recibe: "",
+    domicilio: "",
+    localidad: "",
+    telefono: "",
+    cuitDni: "",
+    horario: "",
+  },
   };
 }
 
@@ -103,11 +113,12 @@ export async function crearPresupuesto(req, res) {
         cond_iva,
         detalle,
         items,
-        totals
+        totals,
+        nota_envio
       )
       VALUES (
         $1,$2,NOW(),NOW(),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-        $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24
+        $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25
       )
       RETURNING *
       `,
@@ -135,7 +146,24 @@ export async function crearPresupuesto(req, res) {
         p.condIva || "",
         p.detalle || "",
         JSON.stringify(p.items || []),
-        JSON.stringify(p.totals || { subtotal: 0, iva: 0, total: 0 }),
+        JSON.stringify(
+        p.totals || {
+        subtotal: 0,
+        iva: 0,
+       total: 0,
+     }
+    ),
+    JSON.stringify(
+    p.notaEnvio || {
+    optica: "",
+    recibe: "",
+    domicilio: "",
+    localidad: "",
+    telefono: "",
+    cuitDni: "",
+    horario: "",
+  }
+),
       ]
     );
 
@@ -177,8 +205,9 @@ export async function actualizarPresupuesto(req, res) {
           cond_iva = $20,
           detalle = $21,
           items = $22,
-          totals = $23
-      WHERE id = $24
+          totals = $23,
+          nota_envio = $24
+      WHERE id = $25
       RETURNING *
       `,
       [
@@ -204,8 +233,27 @@ export async function actualizarPresupuesto(req, res) {
         p.condIva || "",
         p.detalle || "",
         JSON.stringify(p.items || []),
-        JSON.stringify(p.totals || { subtotal: 0, iva: 0, total: 0 }),
-        id,
+
+JSON.stringify(
+  p.totals || {
+    subtotal: 0,
+    iva: 0,
+    total: 0,
+  }
+),
+
+JSON.stringify(
+  p.notaEnvio || {
+    optica: "",
+    recibe: "",
+    domicilio: "",
+    localidad: "",
+    telefono: "",
+    cuitDni: "",
+    horario: "",
+  }
+),
+id,
       ]
     );
 
@@ -250,6 +298,16 @@ export async function aprobarPresupuesto(req, res) {
     }
 
     const p = pres.rows[0];
+    const notaEnvio =
+  p.nota_envio || {
+    optica: p.cliente || "",
+    recibe: "",
+    domicilio: p.domicilio || "",
+    localidad: p.ubicacion || "",
+    telefono: p.telefono || "",
+    cuitDni: p.cuit || "",
+    horario: "",
+  };
 
     // =========================
     // YA APROBADO
@@ -347,6 +405,8 @@ export async function aprobarPresupuesto(req, res) {
 
             presupuestoId: p.id,
 
+            notaEnvio,
+
             clienteId: p.cliente_id || null,
 
             sectoresAsignados,
@@ -392,6 +452,7 @@ export async function aprobarPresupuesto(req, res) {
                   iva: 0,
                   total: 0,
                 },
+                notaEnvio,
             },
           }),
 
