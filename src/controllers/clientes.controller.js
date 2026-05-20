@@ -15,6 +15,14 @@ function mapCliente(row) {
     dni: row.dni || "",
     email: row.email || "",
     expreso: row.expreso || "",
+
+    notaEnvioOptica: row.nota_envio_optica || "",
+    notaEnvioRecibe: row.nota_envio_recibe || "",
+    notaEnvioDomicilio: row.nota_envio_domicilio || "",
+    notaEnvioLocalidad: row.nota_envio_localidad || "",
+    notaEnvioTelefono: row.nota_envio_telefono || "",
+    notaEnvioCuitDni: row.nota_envio_cuit_dni || "",
+    notaEnvioHorario: row.nota_envio_horario || "",
   };
 }
 
@@ -59,9 +67,16 @@ export async function crearCliente(req, res) {
         nombre_apellido,
         dni,
         email,
-        expreso
+        expreso,
+        nota_envio_optica,
+        nota_envio_recibe,
+        nota_envio_domicilio,
+        nota_envio_localidad,
+        nota_envio_telefono,
+        nota_envio_cuit_dni,
+        nota_envio_horario
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
       RETURNING *
       `,
       [
@@ -77,6 +92,13 @@ export async function crearCliente(req, res) {
         clean(c.dni),
         clean(c.email),
         clean(c.expreso),
+        clean(c.notaEnvioOptica || c.nombre),
+        clean(c.notaEnvioRecibe || c.nombreApellido),
+        clean(c.notaEnvioDomicilio || c.direccionEnvio || c.direccion),
+        clean(c.notaEnvioLocalidad || c.localidad),
+        clean(c.notaEnvioTelefono || c.telefono),
+        clean(c.notaEnvioCuitDni || c.cuit || c.dni),
+        clean(c.notaEnvioHorario),
       ]
     );
 
@@ -111,8 +133,15 @@ export async function actualizarCliente(req, res) {
           dni = $10,
           email = $11,
           expreso = $12,
+          nota_envio_optica = $13,
+          nota_envio_recibe = $14,
+          nota_envio_domicilio = $15,
+          nota_envio_localidad = $16,
+          nota_envio_telefono = $17,
+          nota_envio_cuit_dni = $18,
+          nota_envio_horario = $19,
           updated_at = NOW()
-      WHERE id = $13
+      WHERE id = $20
       RETURNING *
       `,
       [
@@ -128,6 +157,13 @@ export async function actualizarCliente(req, res) {
         clean(c.dni),
         clean(c.email),
         clean(c.expreso),
+        clean(c.notaEnvioOptica || c.nombre),
+        clean(c.notaEnvioRecibe || c.nombreApellido),
+        clean(c.notaEnvioDomicilio || c.direccionEnvio || c.direccion),
+        clean(c.notaEnvioLocalidad || c.localidad),
+        clean(c.notaEnvioTelefono || c.telefono),
+        clean(c.notaEnvioCuitDni || c.cuit || c.dni),
+        clean(c.notaEnvioHorario),
         id,
       ]
     );
