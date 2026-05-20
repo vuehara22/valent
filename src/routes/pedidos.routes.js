@@ -168,6 +168,55 @@ router.put("/:id", async (req, res) => {
   }
 });
 
+router.patch("/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ message: "ID inválido" });
+    }
+
+    const currentResult = await pool.query(
+      `
+      SELECT *
+      FROM pedidos
+      WHERE id = $1
+      `,
+      [id]
+    );
+
+    if (currentResult.rowCount === 0) {
+      return res.status(404).json({ message: "Pedido no encontrado" });
+    }
+
+    const current = currentResult.rows[0];
+
+    const nextExtras =
+      req.body?.extras && typeof req.body.extras === "object"
+        ? req.body.extras
+        : current.extras || {};
+
+    const result = await pool.query(
+      `
+      UPDATE pedidos
+      SET
+        extras = $1::jsonb,
+        updated_at = NOW()
+      WHERE id = $2
+      RETURNING *
+      `,
+      [JSON.stringify(nextExtras), id]
+    );
+
+    res.json(mapPedido(result.rows[0]));
+  } catch (error) {
+    console.error("Error PATCH /api/pedidos/:id:", error);
+    res.status(500).json({
+      message: "Error actualizando extras del pedido",
+    });
+  }
+});
+
 router.delete("/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
