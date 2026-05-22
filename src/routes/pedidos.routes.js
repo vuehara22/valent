@@ -1,7 +1,15 @@
 import { Router } from "express";
 import { pool } from "../config/db.js";
+import multer from "multer";
 
 const router = Router();
+
+const uploadArchivoPedido = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 15 * 1024 * 1024,
+  },
+});
 
 function mapPedido(row) {
   return {
@@ -45,6 +53,234 @@ router.get("/", async (_req, res) => {
   } catch (error) {
     console.error("Error GET /api/pedidos:", error);
     res.status(500).json({ message: "Error al obtener pedidos" });
+  }
+});
+
+
+router.get("/:id/archivos", async (req, res) => {
+  try {
+    const pedidoId = Number(req.params.id);
+
+    if (!Number.isFinite(pedidoId)) {
+      return res.status(400).json({ ok: false, message: "ID inválido" });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        pedido_id,
+        tipo,
+        tag,
+        nombre,
+        mime_type,
+        size_bytes,
+        ruta,
+        created_at
+      FROM archivos_pedido
+      WHERE pedido_id = $1
+      ORDER BY created_at DESC, id DESC
+      `,
+      [pedidoId]
+    );
+
+    res.json({
+      ok: true,
+      archivos: result.rows,
+    });
+  } catch (error) {
+    console.error("Error GET /api/pedidos/:id/archivos:", error);
+    res.status(500).json({
+      ok: false,
+      message: "Error al obtener archivos del pedido",
+    });
+  }
+});
+
+router.post(
+  "/:id/archivos",
+  uploadArchivoPedido.single("file"),
+  async (req, res) => {
+    try {
+      const pedidoId = Number(req.params.id);
+
+      if (!Number.isFinite(pedidoId)) {
+        return res.status(400).json({ ok: false, message: "ID inválido" });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({
+          ok: false,
+          message: "No se recibió archivo",
+        });
+      }
+
+      const tipo = String(req.body.tipo || "GUIA").trim().toUpperCase();
+      const tag = String(req.body.tag || "LOGISTICA").trim().toUpperCase();
+
+      const pedidoExists = await pool.query(
+        `
+        SELECT id
+        FROM pedidos
+        WHERE id = $1
+        `,
+        [pedidoId]
+      );
+
+      if (pedidoExists.rowCount === 0) {
+        return res.status(404).json({
+          ok: false,
+          message: "Pedido no encontrado",
+        });
+      }
+
+      const result = await pool.query(
+        `
+        INSERT INTO archivos_pedido (
+          pedido_id,
+          tipo,
+          tag,
+          nombre,
+          mime_type,
+          size_bytes,
+          ruta,
+          contenido,
+          created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        RETURNING
+          id,
+          pedido_id,
+          tipo,
+          tag,
+          nombre,
+          mime_type,
+          size_bytes,
+          ruta,
+          created_at
+        `,
+        [
+          pedidoId,
+          tipo,
+          tag,
+          req.file.originalname,
+          req.file.mimetype,
+          req.file.size,
+          `/api/pedidos/${pedidoId}/archivos/download`,
+          req.file.buffer,
+        ]
+      );
+
+      res.status(201).json({
+        ok: true,
+        archivo: result.rows[0],
+      });
+    } catch (error) {
+      console.error("Error POST /api/pedidos/:id/archivos:", error);
+      res.status(500).json({
+        ok: false,
+        message: "Error al subir archivo del pedido",
+      });
+    }
+  }
+);
+
+router.get("/:id/archivos/:archivoId/download", async (req, res) => {
+  try {
+    const pedidoId = Number(req.params.id);
+    const archivoId = Number(req.params.archivoId);
+
+    if (!Number.isFinite(pedidoId) || !Number.isFinite(archivoId)) {
+      return res.status(400).json({ ok: false, message: "ID inválido" });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        pedido_id,
+        nombre,
+        mime_type,
+        contenido
+      FROM archivos_pedido
+      WHERE id = $1
+      AND pedido_id = $2
+      `,
+      [archivoId, pedidoId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        ok: false,
+        message: "Archivo no encontrado",
+      });
+    }
+
+    const archivo = result.rows[0];
+
+    if (!archivo.contenido) {
+      return res.status(404).json({
+        ok: false,
+        message: "El archivo no tiene contenido guardado",
+      });
+    }
+
+    res.setHeader(
+      "Content-Type",
+      archivo.mime_type || "application/octet-stream"
+    );
+
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(archivo.nombre)}"`
+    );
+
+    res.send(archivo.contenido);
+  } catch (error) {
+    console.error("Error DOWNLOAD /api/pedidos/:id/archivos/:archivoId:", error);
+    res.status(500).json({
+      ok: false,
+      message: "Error al descargar archivo",
+    });
+  }
+});
+
+router.delete("/:id/archivos/:archivoId", async (req, res) => {
+  try {
+    const pedidoId = Number(req.params.id);
+    const archivoId = Number(req.params.archivoId);
+
+    if (!Number.isFinite(pedidoId) || !Number.isFinite(archivoId)) {
+      return res.status(400).json({ ok: false, message: "ID inválido" });
+    }
+
+    const result = await pool.query(
+      `
+      DELETE FROM archivos_pedido
+      WHERE id = $1
+      AND pedido_id = $2
+      RETURNING id
+      `,
+      [archivoId, pedidoId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        ok: false,
+        message: "Archivo no encontrado",
+      });
+    }
+
+    res.json({
+      ok: true,
+      deletedId: archivoId,
+    });
+  } catch (error) {
+    console.error("Error DELETE /api/pedidos/:id/archivos/:archivoId:", error);
+    res.status(500).json({
+      ok: false,
+      message: "Error al eliminar archivo",
+    });
   }
 });
 
