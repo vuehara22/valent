@@ -171,10 +171,22 @@ router.post(
         ]
       );
 
-      res.status(201).json({
-        ok: true,
-        archivo: result.rows[0],
-      });
+      const archivo = result.rows[0];
+
+res.status(201).json({
+  ok: true,
+  archivo: {
+    id: String(archivo.id),
+    pedidoId: archivo.pedido_id,
+    tipo: archivo.tipo,
+    tag: archivo.tag,
+    nombre: archivo.nombre,
+    mimeType: archivo.mime_type,
+    size: archivo.size_bytes,
+    fecha: archivo.created_at,
+    url: `/api/pedidos/${pedidoId}/archivos/${archivo.id}/download`,
+  },
+});
     } catch (error) {
       console.error("Error POST /api/pedidos/:id/archivos:", error);
       res.status(500).json({
