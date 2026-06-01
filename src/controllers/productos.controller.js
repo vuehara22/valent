@@ -522,9 +522,7 @@ export async function eliminarProducto(req, res) {
 
     const result = await pool.query(
       `
-      UPDATE productos
-      SET activo = FALSE,
-          updated_at = NOW()
+      DELETE FROM productos
       WHERE id = $1
       RETURNING id, nombre, codigo, categoria, precio, stock, sector, activo, created_at, updated_at
       `,
@@ -545,6 +543,7 @@ export async function eliminarProducto(req, res) {
     });
   } catch (error) {
     console.error("Error al eliminar producto:", error);
+
     res.status(500).json({
       ok: false,
       error: "Error al eliminar producto",
