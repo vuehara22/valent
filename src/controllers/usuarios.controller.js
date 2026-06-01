@@ -114,17 +114,99 @@ async function ensureUsuariosTable() {
     ON usuarios (LOWER(email))
   `);
 }
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (forwarded) {
+    return String(forwarded).split(",")[0].trim();
+  }
+
+  return req.ip || req.socket?.remoteAddress || "";
+}
+
+async function ensureSecurityTables() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS usuario_dispositivos (
+      id SERIAL PRIMARY KEY,
+      usuario_id INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      device_id TEXT NOT NULL,
+      nombre_dispositivo TEXT,
+      user_agent TEXT,
+      ip TEXT,
+      autorizado BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      autorizado_at TIMESTAMP,
+      UNIQUE(usuario_id, device_id)
+    )
+  `);
+
+  await pool.query(`
+    ALTER TABLE usuario_dispositivos
+    ADD COLUMN IF NOT EXISTS ip TEXT
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS configuracion_seguridad (
+      id SERIAL PRIMARY KEY,
+      solo_red_empresa BOOLEAN DEFAULT TRUE,
+      ips_permitidas TEXT[]
+    )
+  `);
+
+  await pool.query(`
+    INSERT INTO configuracion_seguridad (solo_red_empresa, ips_permitidas)
+    SELECT TRUE, ARRAY[]::TEXT[]
+    WHERE NOT EXISTS (SELECT 1 FROM configuracion_seguridad)
+  `);
+}
+
+async function getSecurityConfig() {
+  await ensureSecurityTables();
+
+  const result = await pool.query(`
+    SELECT *
+    FROM configuracion_seguridad
+    ORDER BY id ASC
+    LIMIT 1
+  `);
+
+  return result.rows[0] || {
+    solo_red_empresa: true,
+    ips_permitidas: [],
+  };
+}
+
+function isIpAllowed(ip, ipsPermitidas) {
+  if (!Array.isArray(ipsPermitidas) || ipsPermitidas.length === 0) {
+    return true;
+  }
+
+  return ipsPermitidas.includes(ip);
+}
+
 export async function loginUsuario(req, res) {
   try {
     await ensureUsuariosTable();
+    await ensureSecurityTables();
 
     const email = String(req.body.email || "").trim().toLowerCase();
     const password = String(req.body.password || "").trim();
+    const deviceId = String(req.body.deviceId || "").trim();
+    const deviceName = String(req.body.deviceName || "Dispositivo").trim();
+
+    const userAgent = req.headers["user-agent"] || "";
+    const ip = getClientIp(req);
 
     if (!email || !password) {
       return res.status(400).json({
         ok: false,
         error: "Email y contraseña son obligatorios",
+      });
+    }
+
+    if (!deviceId) {
+      return res.status(400).json({
+        ok: false,
+        error: "No se pudo identificar el dispositivo.",
       });
     }
 
@@ -146,6 +228,7 @@ export async function loginUsuario(req, res) {
     }
 
     const usuario = result.rows[0];
+    const usuarioNormalizado = normalizeUsuario(usuario);
 
     if (String(usuario.password || "") !== password) {
       return res.status(401).json({
@@ -161,12 +244,99 @@ export async function loginUsuario(req, res) {
       });
     }
 
+    const isSuperAdmin = usuarioNormalizado.role === "SUPER_ADMIN";
+
+    const config = await getSecurityConfig();
+
+    if (
+      !isSuperAdmin &&
+      config.solo_red_empresa === true &&
+      !isIpAllowed(ip, config.ips_permitidas)
+    ) {
+      await pool.query(
+        `
+        INSERT INTO usuario_dispositivos (
+          usuario_id,
+          device_id,
+          nombre_dispositivo,
+          user_agent,
+          ip,
+          autorizado
+        )
+        VALUES ($1, $2, $3, $4, $5, false)
+        ON CONFLICT (usuario_id, device_id)
+        DO UPDATE SET
+          nombre_dispositivo = EXCLUDED.nombre_dispositivo,
+          user_agent = EXCLUDED.user_agent,
+          ip = EXCLUDED.ip
+        `,
+        [usuario.id, deviceId, deviceName, userAgent, ip]
+      );
+
+      return res.status(403).json({
+        ok: false,
+        requiresApproval: true,
+        blockedByNetwork: true,
+        error:
+          "Acceso bloqueado. Solo se puede ingresar desde la red autorizada de la empresa.",
+      });
+    }
+
+    if (!isSuperAdmin) {
+      const deviceResult = await pool.query(
+        `
+        SELECT *
+        FROM usuario_dispositivos
+        WHERE usuario_id = $1
+          AND device_id = $2
+        LIMIT 1
+        `,
+        [usuario.id, deviceId]
+      );
+
+      const dispositivo = deviceResult.rows[0];
+
+      if (!dispositivo) {
+        await pool.query(
+          `
+          INSERT INTO usuario_dispositivos (
+            usuario_id,
+            device_id,
+            nombre_dispositivo,
+            user_agent,
+            ip,
+            autorizado
+          )
+          VALUES ($1, $2, $3, $4, $5, false)
+          `,
+          [usuario.id, deviceId, deviceName, userAgent, ip]
+        );
+
+        return res.status(403).json({
+          ok: false,
+          requiresApproval: true,
+          error:
+            "Dispositivo pendiente de autorización. Un super admin debe aprobarlo.",
+        });
+      }
+
+      if (!dispositivo.autorizado) {
+        return res.status(403).json({
+          ok: false,
+          requiresApproval: true,
+          error:
+            "Este dispositivo todavía no fue autorizado por un super admin.",
+        });
+      }
+    }
+
     return res.json({
       ok: true,
-      usuario: normalizeUsuario(usuario),
+      usuario: usuarioNormalizado,
     });
   } catch (error) {
     console.error("Error login usuario:", error);
+
     res.status(500).json({
       ok: false,
       error: "Error iniciando sesión",
@@ -426,6 +596,112 @@ export async function deleteUsuario(req, res) {
       ok: false,
       error: "Error eliminando usuario",
       detail: error.message,
+    });
+  }
+}
+export async function getDispositivosPendientes(_req, res) {
+  try {
+    await ensureSecurityTables();
+
+    const result = await pool.query(`
+      SELECT
+        ud.id,
+        ud.usuario_id,
+        ud.device_id,
+        ud.nombre_dispositivo,
+        ud.user_agent,
+        ud.ip,
+        ud.autorizado,
+        ud.created_at,
+        u.nombre,
+        u.email,
+        u.role
+      FROM usuario_dispositivos ud
+      JOIN usuarios u ON u.id = ud.usuario_id
+      WHERE ud.autorizado = false
+      ORDER BY ud.created_at DESC
+    `);
+
+    return res.json({
+      ok: true,
+      dispositivos: result.rows,
+    });
+  } catch (error) {
+    console.error("Error obteniendo dispositivos pendientes:", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "No se pudieron obtener los dispositivos pendientes.",
+    });
+  }
+}
+
+export async function autorizarDispositivo(req, res) {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `
+      UPDATE usuario_dispositivos
+      SET autorizado = true,
+          autorizado_at = NOW()
+      WHERE id = $1
+      RETURNING *
+      `,
+      [id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: "Dispositivo no encontrado.",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      dispositivo: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Error autorizando dispositivo:", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "No se pudo autorizar el dispositivo.",
+    });
+  }
+}
+
+export async function rechazarDispositivo(req, res) {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `
+      DELETE FROM usuario_dispositivos
+      WHERE id = $1
+      RETURNING *
+      `,
+      [id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: "Dispositivo no encontrado.",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      deleted: true,
+    });
+  } catch (error) {
+    console.error("Error rechazando dispositivo:", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "No se pudo rechazar el dispositivo.",
     });
   }
 }

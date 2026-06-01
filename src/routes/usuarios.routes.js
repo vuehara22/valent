@@ -7,12 +7,18 @@ import {
   updateUsuario,
   deleteUsuario,
   loginUsuario,
+  getDispositivosPendientes,
+  autorizarDispositivo,
+  rechazarDispositivo,
 } from "../controllers/usuarios.controller.js";
 
 const router = express.Router();
 
 router.get("/", getUsuarios);
 router.post("/login", loginUsuario);
+router.get("/seguridad/dispositivos-pendientes", getDispositivosPendientes);
+router.put("/seguridad/dispositivos/:id/autorizar", autorizarDispositivo);
+router.delete("/seguridad/dispositivos/:id", rechazarDispositivo);
 router.post("/", createUsuario);
 router.put("/:id", updateUsuario);
 router.delete("/:id", deleteUsuario);
