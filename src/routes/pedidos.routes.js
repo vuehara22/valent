@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { pool } from "../config/db.js";
 import multer from "multer";
+import { emitPedidoActualizado } from "../realtime.js";
 
 const router = Router();
 
@@ -41,6 +42,14 @@ function normalizePedidoBody(body) {
   };
 }
 
+function emitirCambioPedido(tipo, pedidoOrPayload) {
+  emitPedidoActualizado({
+    tipo,
+    pedidoId: pedidoOrPayload?.id || pedidoOrPayload?.pedidoId || null,
+    sector: pedidoOrPayload?.sector || null,
+  });
+}
+
 router.get("/", async (_req, res) => {
   try {
     const result = await pool.query(`
@@ -55,7 +64,6 @@ router.get("/", async (_req, res) => {
     res.status(500).json({ message: "Error al obtener pedidos" });
   }
 });
-
 
 router.get("/:id/archivos", async (req, res) => {
   try {
@@ -120,7 +128,7 @@ router.post(
 
       const pedidoExists = await pool.query(
         `
-        SELECT id
+        SELECT id, sector
         FROM pedidos
         WHERE id = $1
         `,
@@ -173,20 +181,25 @@ router.post(
 
       const archivo = result.rows[0];
 
-res.status(201).json({
-  ok: true,
-  archivo: {
-    id: String(archivo.id),
-    pedidoId: archivo.pedido_id,
-    tipo: archivo.tipo,
-    tag: archivo.tag,
-    nombre: archivo.nombre,
-    mimeType: archivo.mime_type,
-    size: archivo.size_bytes,
-    fecha: archivo.created_at,
-    url: `/api/pedidos/${pedidoId}/archivos/${archivo.id}/download`,
-  },
-});
+      emitirCambioPedido("ARCHIVO_SUBIDO", {
+        pedidoId,
+        sector: pedidoExists.rows[0]?.sector || null,
+      });
+
+      res.status(201).json({
+        ok: true,
+        archivo: {
+          id: String(archivo.id),
+          pedidoId: archivo.pedido_id,
+          tipo: archivo.tipo,
+          tag: archivo.tag,
+          nombre: archivo.nombre,
+          mimeType: archivo.mime_type,
+          size: archivo.size_bytes,
+          fecha: archivo.created_at,
+          url: `/api/pedidos/${pedidoId}/archivos/${archivo.id}/download`,
+        },
+      });
     } catch (error) {
       console.error("Error POST /api/pedidos/:id/archivos:", error);
       res.status(500).json({
@@ -266,6 +279,15 @@ router.delete("/:id/archivos/:archivoId", async (req, res) => {
       return res.status(400).json({ ok: false, message: "ID inválido" });
     }
 
+    const pedidoExists = await pool.query(
+      `
+      SELECT id, sector
+      FROM pedidos
+      WHERE id = $1
+      `,
+      [pedidoId]
+    );
+
     const result = await pool.query(
       `
       DELETE FROM archivos_pedido
@@ -282,6 +304,11 @@ router.delete("/:id/archivos/:archivoId", async (req, res) => {
         message: "Archivo no encontrado",
       });
     }
+
+    emitirCambioPedido("ARCHIVO_ELIMINADO", {
+      pedidoId,
+      sector: pedidoExists.rows[0]?.sector || null,
+    });
 
     res.json({
       ok: true,
@@ -357,7 +384,11 @@ router.post("/", async (req, res) => {
       ]
     );
 
-    res.status(201).json(mapPedido(result.rows[0]));
+    const pedidoCreado = mapPedido(result.rows[0]);
+
+    emitirCambioPedido("CREADO", pedidoCreado);
+
+    res.status(201).json(pedidoCreado);
   } catch (error) {
     console.error("Error POST /api/pedidos:", error);
     res.status(500).json({ message: "Error al crear pedido" });
@@ -409,7 +440,11 @@ router.put("/:id", async (req, res) => {
       return res.status(404).json({ message: "Pedido no encontrado" });
     }
 
-    res.json(mapPedido(result.rows[0]));
+    const pedidoActualizado = mapPedido(result.rows[0]);
+
+    emitirCambioPedido("ACTUALIZADO", pedidoActualizado);
+
+    res.json(pedidoActualizado);
   } catch (error) {
     console.error("Error PUT /api/pedidos/:id:", error);
     res.status(500).json({ message: "Error al actualizar pedido" });
@@ -441,26 +476,39 @@ router.patch("/:id", async (req, res) => {
 
     const nextExtras =
       req.body?.extras && typeof req.body.extras === "object"
-        ? req.body.extras
+        ? {
+            ...(current.extras || {}),
+            ...req.body.extras,
+          }
         : current.extras || {};
+
+    const nextEstados =
+      Array.isArray(req.body.estados) && req.body.estados.length > 0
+        ? req.body.estados
+        : current.estados || ["PENDIENTE"];
 
     const result = await pool.query(
       `
       UPDATE pedidos
       SET
-        extras = $1::jsonb,
+        estados = $1::jsonb,
+        extras = $2::jsonb,
         updated_at = NOW()
-      WHERE id = $2
+      WHERE id = $3
       RETURNING *
       `,
-      [JSON.stringify(nextExtras), id]
+      [JSON.stringify(nextEstados), JSON.stringify(nextExtras), id]
     );
 
-    res.json(mapPedido(result.rows[0]));
+    const pedidoActualizado = mapPedido(result.rows[0]);
+
+    emitirCambioPedido("PATCH", pedidoActualizado);
+
+    res.json(pedidoActualizado);
   } catch (error) {
     console.error("Error PATCH /api/pedidos/:id:", error);
     res.status(500).json({
-      message: "Error actualizando extras del pedido",
+      message: "Error actualizando pedido",
     });
   }
 });
@@ -495,7 +543,11 @@ router.delete("/:id", async (req, res) => {
       return res.status(404).json({ message: "Pedido no encontrado" });
     }
 
-    res.json({ ok: true, pedido: mapPedido(result.rows[0]) });
+    const pedidoCancelado = mapPedido(result.rows[0]);
+
+    emitirCambioPedido("CANCELADO", pedidoCancelado);
+
+    res.json({ ok: true, pedido: pedidoCancelado });
   } catch (error) {
     console.error("Error DELETE /api/pedidos/:id:", error);
     res.status(500).json({ message: "Error al cancelar pedido" });
