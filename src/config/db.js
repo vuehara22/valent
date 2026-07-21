@@ -1,30 +1,60 @@
+import dotenv from "dotenv";
 import pg from "pg";
-import "dotenv/config";
+
+dotenv.config();
 
 const { Pool } = pg;
 
-const isRender = !!process.env.DATABASE_URL;
+const isProduction = process.env.NODE_ENV === "production";
 
-export const pool = new Pool({
-  // 👉 Si está en Render usa DATABASE_URL
-  connectionString: isRender ? process.env.DATABASE_URL : undefined,
+const poolConfig = process.env.DATABASE_URL
+  ? {
+      connectionString: process.env.DATABASE_URL,
+      ssl: {
+        rejectUnauthorized: false,
+      },
+    }
+  : {
+      host: process.env.DB_HOST || "localhost",
+      port: Number(process.env.DB_PORT || 5432),
+      user: process.env.DB_USER || "postgres",
+      password: String(process.env.DB_PASSWORD || ""),
+      database: process.env.DB_NAME || "valent",
+      ssl: false,
+    };
 
-  // 👉 Si está en local usa tus variables
-  host: isRender ? undefined : process.env.DB_HOST || "localhost",
-  port: isRender ? undefined : Number(process.env.DB_PORT || 5432),
-  database: isRender ? undefined : process.env.DB_NAME || "valent_db",
-  user: isRender ? undefined : process.env.DB_USER || "postgres",
-  password: isRender ? undefined : process.env.DB_PASSWORD,
+export const pool = new Pool(poolConfig);
 
-  // 👉 IMPORTANTE para Render (SSL)
-  ssl: isRender ? { rejectUnauthorized: false } : false,
-});
-
-// opcional pero MUY útil para debug
 pool.on("connect", () => {
-  console.log("🟢 Conectado a PostgreSQL");
+  console.log(
+    process.env.DATABASE_URL
+      ? "🟢 Conectado a PostgreSQL de Render"
+      : "🟢 Conectado a PostgreSQL local"
+  );
 });
 
-pool.on("error", (err) => {
-  console.error("🔴 Error en PostgreSQL:", err);
+pool.on("error", (error) => {
+  console.error("🔴 Error inesperado en PostgreSQL:", error);
 });
+
+export async function testDatabaseConnection() {
+  try {
+    const result = await pool.query("SELECT NOW() AS fecha_actual");
+
+    console.log(
+      "🟢 Base de datos conectada correctamente:",
+      result.rows[0].fecha_actual
+    );
+
+    return true;
+  } catch (error) {
+    console.error(
+      "🔴 Error al conectar con la base de datos:",
+      error.message
+    );
+
+    return false;
+  }
+}
+
+export default pool;
