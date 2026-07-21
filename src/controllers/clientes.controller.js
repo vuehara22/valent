@@ -4,6 +4,35 @@ function clean(value) {
   return String(value ?? "").trim();
 }
 
+function generarArchivoId() {
+  return `archivo-cliente-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+function normalizarTipoArchivo(value, nombre = "", mimeType = "") {
+  const tipoRecibido = clean(value).toUpperCase();
+  const nombreNormalizado = clean(nombre).toLowerCase();
+  const mimeNormalizado = clean(mimeType).toLowerCase();
+
+  if (tipoRecibido === "LOGO" || tipoRecibido === "DXF") {
+    return tipoRecibido;
+  }
+
+  if (
+    nombreNormalizado.endsWith(".dxf") ||
+    mimeNormalizado.includes("dxf")
+  ) {
+    return "DXF";
+  }
+
+  if (mimeNormalizado.startsWith("image/")) {
+    return "LOGO";
+  }
+
+  return "";
+}
+
 function normalizarArchivosCliente(value) {
   if (!value) {
     return [];
@@ -23,44 +52,90 @@ function normalizarArchivosCliente(value) {
     return [];
   }
 
-  return archivos
-    .filter((archivo) => {
-      return (
-        archivo &&
-        typeof archivo === "object" &&
-        archivo.dataUrl
-      );
-    })
-    .map((archivo) => ({
-      id:
-        clean(archivo.id) ||
-        `archivo-cliente-${Date.now()}-${Math.random()
-          .toString(36)
-          .slice(2, 10)}`,
+  const archivosNormalizados = [];
+  const idsUsados = new Set();
 
-      nombre:
-        clean(archivo.nombre) ||
-        "archivo",
+  for (const archivo of archivos) {
+    if (!archivo || typeof archivo !== "object") {
+      continue;
+    }
 
-      tipo:
-        clean(archivo.tipo).toUpperCase() ||
-        "ARCHIVO",
+    const nombre = clean(archivo.nombre) || "archivo";
+    const mimeType =
+      clean(archivo.mimeType) || "application/octet-stream";
 
-      mimeType:
-        clean(archivo.mimeType) ||
-        "application/octet-stream",
+    const dataUrl = clean(
+      archivo.dataUrl ||
+        archivo.url ||
+        archivo.href ||
+        ""
+    );
 
-      size: Number(archivo.size) || 0,
+    if (!dataUrl) {
+      continue;
+    }
 
-      fecha:
-        clean(archivo.fecha) ||
-        new Date().toISOString(),
+    const tipo = normalizarTipoArchivo(
+      archivo.tipo,
+      nombre,
+      mimeType
+    );
 
-      dataUrl: clean(archivo.dataUrl),
-    }));
+    if (tipo !== "LOGO" && tipo !== "DXF") {
+      continue;
+    }
+
+    let id = clean(archivo.id) || generarArchivoId();
+
+    while (idsUsados.has(id)) {
+      id = generarArchivoId();
+    }
+
+    idsUsados.add(id);
+
+    archivosNormalizados.push({
+      id,
+      nombre,
+      tipo,
+      mimeType,
+      size: Math.max(0, Number(archivo.size) || 0),
+      fecha: clean(archivo.fecha) || new Date().toISOString(),
+      dataUrl,
+    });
+  }
+
+  return archivosNormalizados;
+}
+
+function parseArchivosClienteDesdeDB(value) {
+  if (!value) {
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    return normalizarArchivosCliente(value);
+  }
+
+  if (typeof value === "object") {
+    return normalizarArchivosCliente(value);
+  }
+
+  if (typeof value === "string") {
+    try {
+      return normalizarArchivosCliente(JSON.parse(value));
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
 }
 
 function mapCliente(row) {
+  if (!row) {
+    return null;
+  }
+
   return {
     id: Number(row.id),
 
@@ -71,98 +146,218 @@ function mapCliente(row) {
     condicionIVA: row.condicion_iva || "",
     cuit: row.cuit || "",
 
-    direccionEnvio:
-      row.direccion_envio || "",
+    direccionEnvio: row.direccion_envio || "",
+    direccionFacturacion: row.direccion_facturacion || "",
 
-    direccionFacturacion:
-      row.direccion_facturacion || "",
-
-    nombreApellido:
-      row.nombre_apellido || "",
-
+    nombreApellido: row.nombre_apellido || "",
     dni: row.dni || "",
     email: row.email || "",
     expreso: row.expreso || "",
 
-    notaEnvioOptica:
-      row.nota_envio_optica || "",
+    notaEnvioOptica: row.nota_envio_optica || "",
+    notaEnvioRecibe: row.nota_envio_recibe || "",
+    notaEnvioDomicilio: row.nota_envio_domicilio || "",
+    notaEnvioLocalidad: row.nota_envio_localidad || "",
+    notaEnvioTelefono: row.nota_envio_telefono || "",
+    notaEnvioCuitDni: row.nota_envio_cuit_dni || "",
+    notaEnvioHorario: row.nota_envio_horario || "",
 
-    notaEnvioRecibe:
-      row.nota_envio_recibe || "",
+    archivosCliente: parseArchivosClienteDesdeDB(
+      row.archivos_cliente
+    ),
 
-    notaEnvioDomicilio:
-      row.nota_envio_domicilio || "",
-
-    notaEnvioLocalidad:
-      row.nota_envio_localidad || "",
-
-    notaEnvioTelefono:
-      row.nota_envio_telefono || "",
-
-    notaEnvioCuitDni:
-      row.nota_envio_cuit_dni || "",
-
-    notaEnvioHorario:
-      row.nota_envio_horario || "",
-
-    archivosCliente:
-      normalizarArchivosCliente(
-        row.archivos_cliente
-      ),
-
-    createdAt:
-      row.created_at || null,
-
-    updatedAt:
-      row.updated_at || null,
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null,
   };
 }
 
-export async function getClientes(
-  _req,
-  res
-) {
+function obtenerArchivosDesdeBody(body) {
+  if (
+    Object.prototype.hasOwnProperty.call(
+      body,
+      "archivosCliente"
+    )
+  ) {
+    return {
+      fueEnviado: true,
+      archivos: normalizarArchivosCliente(
+        body.archivosCliente
+      ),
+    };
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(
+      body,
+      "archivos_cliente"
+    )
+  ) {
+    return {
+      fueEnviado: true,
+      archivos: normalizarArchivosCliente(
+        body.archivos_cliente
+      ),
+    };
+  }
+
+  return {
+    fueEnviado: false,
+    archivos: [],
+  };
+}
+
+async function existeClienteDuplicado({
+  clienteId = null,
+  nombre,
+  cuit,
+  dni,
+  email,
+}) {
+  const result = await pool.query(
+    `
+    SELECT id, nombre, cuit, dni, email
+    FROM clientes
+    WHERE
+      ($1::int IS NULL OR id <> $1)
+      AND (
+        LOWER(TRIM(nombre)) = LOWER(TRIM($2))
+        OR (
+          NULLIF(TRIM($3), '') IS NOT NULL
+          AND REGEXP_REPLACE(COALESCE(cuit, ''), '\\D', '', 'g') =
+              REGEXP_REPLACE($3, '\\D', '', 'g')
+        )
+        OR (
+          NULLIF(TRIM($4), '') IS NOT NULL
+          AND REGEXP_REPLACE(COALESCE(dni, ''), '\\D', '', 'g') =
+              REGEXP_REPLACE($4, '\\D', '', 'g')
+        )
+        OR (
+          NULLIF(TRIM($5), '') IS NOT NULL
+          AND LOWER(TRIM(COALESCE(email, ''))) =
+              LOWER(TRIM($5))
+        )
+      )
+    LIMIT 1
+    `,
+    [
+      clienteId,
+      clean(nombre),
+      clean(cuit),
+      clean(dni),
+      clean(email),
+    ]
+  );
+
+  return result.rows[0] || null;
+}
+
+export async function getClientes(_req, res) {
   try {
     const result = await pool.query(`
       SELECT *
       FROM clientes
-      ORDER BY nombre ASC
+      ORDER BY nombre ASC, id ASC
     `);
 
     return res.json(
-      result.rows.map(mapCliente)
+      result.rows
+        .map(mapCliente)
+        .filter(Boolean)
     );
   } catch (error) {
-    console.error(
-      "Error al obtener clientes:",
-      error
-    );
+    console.error("Error al obtener clientes:", error);
 
     return res.status(500).json({
-      error:
-        "Error al obtener clientes",
+      error: "Error al obtener clientes",
+      detalle:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : undefined,
     });
   }
 }
 
-export async function crearCliente(
-  req,
-  res
-) {
+export async function getClientePorId(req, res) {
   try {
-    const c = req.body ?? {};
+    const clienteId = Number(req.params.id);
 
-    if (!clean(c.nombre)) {
+    if (
+      !Number.isInteger(clienteId) ||
+      clienteId <= 0
+    ) {
       return res.status(400).json({
-        error:
-          "El nombre es obligatorio",
+        error: "ID de cliente inválido",
       });
     }
 
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM clientes
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [clienteId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: "Cliente no encontrado",
+      });
+    }
+
+    return res.json(mapCliente(result.rows[0]));
+  } catch (error) {
+    console.error(
+      "Error al obtener cliente por ID:",
+      error
+    );
+
+    return res.status(500).json({
+      error: "Error al obtener el cliente",
+      detalle:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : undefined,
+    });
+  }
+}
+
+export async function crearCliente(req, res) {
+  try {
+    const c = req.body ?? {};
+
+    const nombre = clean(c.nombre);
+
+    if (!nombre) {
+      return res.status(400).json({
+        error: "El nombre es obligatorio",
+      });
+    }
+
+    const archivosRecibidos =
+      obtenerArchivosDesdeBody(c);
+
     const archivosCliente =
-      normalizarArchivosCliente(
-        c.archivosCliente
-      );
+      archivosRecibidos.archivos;
+
+    const duplicado = await existeClienteDuplicado({
+      nombre,
+      cuit: c.cuit,
+      dni: c.dni,
+      email: c.email,
+    });
+
+    if (duplicado) {
+      return res.status(409).json({
+        error:
+          "Ya existe un cliente con el mismo nombre, CUIT, DNI o email",
+        clienteDuplicado: {
+          id: Number(duplicado.id),
+          nombre: duplicado.nombre || "",
+        },
+      });
+    }
 
     const result = await pool.query(
       `
@@ -213,7 +408,7 @@ export async function crearCliente(
       RETURNING *
       `,
       [
-        clean(c.nombre),
+        nombre,
         clean(c.direccion),
         clean(c.localidad),
         clean(c.telefono),
@@ -222,9 +417,7 @@ export async function crearCliente(
 
         clean(c.direccionEnvio),
 
-        clean(
-          c.direccionFacturacion
-        ),
+        clean(c.direccionFacturacion),
 
         clean(c.nombreApellido),
         clean(c.dni),
@@ -238,7 +431,8 @@ export async function crearCliente(
 
         clean(
           c.notaEnvioRecibe ||
-            c.nombreApellido
+            c.nombreApellido ||
+            c.nombre
         ),
 
         clean(
@@ -263,45 +457,33 @@ export async function crearCliente(
             c.dni
         ),
 
-        clean(
-          c.notaEnvioHorario
-        ),
+        clean(c.notaEnvioHorario),
 
-        JSON.stringify(
-          archivosCliente
-        ),
+        JSON.stringify(archivosCliente),
       ]
     );
 
     return res
       .status(201)
-      .json(
-        mapCliente(
-          result.rows[0]
-        )
-      );
+      .json(mapCliente(result.rows[0]));
   } catch (error) {
-    console.error(
-      "Error al crear cliente:",
-      error
-    );
+    console.error("Error al crear cliente:", error);
 
     return res.status(500).json({
-      error:
-        "Error al crear cliente",
+      error: "Error al crear cliente",
+      detalle:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : undefined,
     });
   }
 }
 
-export async function actualizarCliente(
-  req,
-  res
-) {
-  try {
-    const clienteId = Number(
-      req.params.id
-    );
+export async function actualizarCliente(req, res) {
+  const client = await pool.connect();
 
+  try {
+    const clienteId = Number(req.params.id);
     const c = req.body ?? {};
 
     if (
@@ -309,24 +491,86 @@ export async function actualizarCliente(
       clienteId <= 0
     ) {
       return res.status(400).json({
-        error:
-          "ID de cliente inválido",
+        error: "ID de cliente inválido",
       });
     }
 
-    if (!clean(c.nombre)) {
+    const nombre = clean(c.nombre);
+
+    if (!nombre) {
       return res.status(400).json({
-        error:
-          "El nombre es obligatorio",
+        error: "El nombre es obligatorio",
       });
     }
 
-    const archivosCliente =
-      normalizarArchivosCliente(
-        c.archivosCliente
+    await client.query("BEGIN");
+
+    const clienteActualResult = await client.query(
+      `
+      SELECT *
+      FROM clientes
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [clienteId]
+    );
+
+    if (clienteActualResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+
+      return res.status(404).json({
+        error: "Cliente no encontrado",
+      });
+    }
+
+    const duplicado = await existeClienteDuplicado({
+      clienteId,
+      nombre,
+      cuit: c.cuit,
+      dni: c.dni,
+      email: c.email,
+    });
+
+    if (duplicado) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        error:
+          "Ya existe otro cliente con el mismo nombre, CUIT, DNI o email",
+        clienteDuplicado: {
+          id: Number(duplicado.id),
+          nombre: duplicado.nombre || "",
+        },
+      });
+    }
+
+    const archivosRecibidos =
+      obtenerArchivosDesdeBody(c);
+
+    const archivosActuales =
+      parseArchivosClienteDesdeDB(
+        clienteActualResult.rows[0].archivos_cliente
       );
 
-    const result = await pool.query(
+    /*
+     * Cuando el frontend envía archivosCliente,
+     * se guarda exactamente ese array.
+     *
+     * Esto permite:
+     * - agregar varios logos;
+     * - agregar varios DXF;
+     * - eliminar archivos individualmente;
+     * - conservar todos los archivos restantes.
+     *
+     * Si el frontend no envía archivosCliente,
+     * se mantienen los archivos existentes.
+     */
+    const archivosCliente =
+      archivosRecibidos.fueEnviado
+        ? archivosRecibidos.archivos
+        : archivosActuales;
+
+    const result = await client.query(
       `
       UPDATE clientes
       SET
@@ -355,7 +599,7 @@ export async function actualizarCliente(
       RETURNING *
       `,
       [
-        clean(c.nombre),
+        nombre,
         clean(c.direccion),
         clean(c.localidad),
         clean(c.telefono),
@@ -364,9 +608,7 @@ export async function actualizarCliente(
 
         clean(c.direccionEnvio),
 
-        clean(
-          c.direccionFacturacion
-        ),
+        clean(c.direccionFacturacion),
 
         clean(c.nombreApellido),
         clean(c.dni),
@@ -380,7 +622,8 @@ export async function actualizarCliente(
 
         clean(
           c.notaEnvioRecibe ||
-            c.nombreApellido
+            c.nombreApellido ||
+            c.nombre
         ),
 
         clean(
@@ -405,61 +648,78 @@ export async function actualizarCliente(
             c.dni
         ),
 
-        clean(
-          c.notaEnvioHorario
-        ),
+        clean(c.notaEnvioHorario),
 
-        JSON.stringify(
-          archivosCliente
-        ),
+        JSON.stringify(archivosCliente),
 
         clienteId,
       ]
     );
 
-    if (
-      result.rows.length === 0
-    ) {
-      return res.status(404).json({
-        error:
-          "Cliente no encontrado",
-      });
-    }
+    await client.query("COMMIT");
 
-    return res.json(
-      mapCliente(
-        result.rows[0]
-      )
-    );
+    return res.json(mapCliente(result.rows[0]));
   } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+
     console.error(
       "Error al actualizar cliente:",
       error
     );
 
     return res.status(500).json({
-      error:
-        "Error al actualizar cliente",
+      error: "Error al actualizar cliente",
+      detalle:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : undefined,
     });
+  } finally {
+    client.release();
   }
 }
 
-export async function eliminarCliente(
-  req,
-  res
-) {
+export async function eliminarCliente(req, res) {
   try {
-    const clienteId = Number(
-      req.params.id
-    );
+    const clienteId = Number(req.params.id);
 
     if (
       !Number.isInteger(clienteId) ||
       clienteId <= 0
     ) {
       return res.status(400).json({
+        error: "ID de cliente inválido",
+      });
+    }
+
+    const pedidosResult = await pool.query(
+      `
+      SELECT COUNT(*)::int AS total
+      FROM pedidos
+      WHERE
+        CASE
+          WHEN jsonb_typeof(extras) = 'object'
+          THEN COALESCE(
+            NULLIF(extras->>'clienteId', ''),
+            NULLIF(extras->>'cliente_id', '')
+          )
+          ELSE NULL
+        END = $1::text
+      `,
+      [clienteId]
+    ).catch(() => ({
+      rows: [{ total: 0 }],
+    }));
+
+    const pedidosAsociados = Number(
+      pedidosResult.rows[0]?.total || 0
+    );
+
+    if (pedidosAsociados > 0) {
+      return res.status(409).json({
         error:
-          "ID de cliente inválido",
+          "No se puede eliminar el cliente porque tiene pedidos asociados",
+        pedidosAsociados,
       });
     }
 
@@ -472,21 +732,15 @@ export async function eliminarCliente(
       [clienteId]
     );
 
-    if (
-      result.rows.length === 0
-    ) {
+    if (result.rows.length === 0) {
       return res.status(404).json({
-        error:
-          "Cliente no encontrado",
+        error: "Cliente no encontrado",
       });
     }
 
     return res.json({
       ok: true,
-
-      cliente: mapCliente(
-        result.rows[0]
-      ),
+      cliente: mapCliente(result.rows[0]),
     });
   } catch (error) {
     console.error(
@@ -495,8 +749,11 @@ export async function eliminarCliente(
     );
 
     return res.status(500).json({
-      error:
-        "Error al eliminar cliente",
+      error: "Error al eliminar cliente",
+      detalle:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : undefined,
     });
   }
 }
