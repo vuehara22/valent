@@ -1,5 +1,18 @@
 import { pool } from "../config/db.js";
 
+const PEDIDO_COLUMNS = `
+  id,
+  cliente,
+  sector,
+  prioridad,
+  dias,
+  estados,
+  extras,
+  fecha,
+  created_at,
+  updated_at
+`;
+
 function safeJson(value, fallback) {
   if (value == null) return fallback;
 
@@ -31,6 +44,10 @@ function normalizeEstados(value) {
     ];
   }
 
+  if (parsed && typeof parsed === "object" && "estado" in parsed) {
+    return [parsed];
+  }
+
   return [
     {
       estado: "PENDIENTE",
@@ -41,14 +58,31 @@ function normalizeEstados(value) {
 
 function normalizeExtras(value) {
   const parsed = safeJson(value, {});
-  return parsed && typeof parsed === "object" ? parsed : {};
+
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    !Array.isArray(parsed)
+  ) {
+    return parsed;
+  }
+
+  return {};
 }
 
 function getEstadoString(value) {
-  if (typeof value === "string") return value.toUpperCase();
+  if (typeof value === "string") {
+    return value.trim().toUpperCase();
+  }
 
-  if (value && typeof value === "object" && "estado" in value) {
-    return String(value.estado || "").toUpperCase();
+  if (
+    value &&
+    typeof value === "object" &&
+    "estado" in value
+  ) {
+    return String(value.estado || "")
+      .trim()
+      .toUpperCase();
   }
 
   return "";
@@ -58,27 +92,34 @@ function isPedidoCancelado(row) {
   const estados = normalizeEstados(row.estados);
   const extras = normalizeExtras(row.extras);
 
-  return (
-    estados.some((e) => getEstadoString(e) === "CANCELADO") ||
-    extras.canceladoAt ||
-    extras.canceladoPorPresupuestoId ||
-    extras.cancelado === true ||
-    extras.presupuesto?.estado === "CANCELADO"
+  return Boolean(
+    estados.some(
+      (estado) =>
+        getEstadoString(estado) === "CANCELADO"
+    ) ||
+      extras.canceladoAt ||
+      extras.canceladoPorPresupuestoId ||
+      extras.cancelado === true ||
+      extras.presupuesto?.estado === "CANCELADO"
   );
 }
 
 function mapPedido(row) {
   const estados = normalizeEstados(row.estados);
   const extras = normalizeExtras(row.extras);
+  const ultimoEstado =
+    estados[estados.length - 1];
 
   return {
     id: row.id,
     cliente: row.cliente,
     sector: row.sector,
     prioridad: row.prioridad,
-    dias: row.dias,
+    dias: Number(row.dias) || 0,
     estados,
-    estado: getEstadoString(estados[estados.length - 1]) || "PENDIENTE",
+    estado:
+      getEstadoString(ultimoEstado) ||
+      "PENDIENTE",
     cancelado: isPedidoCancelado(row),
     extras,
     fecha: row.fecha,
@@ -87,41 +128,176 @@ function mapPedido(row) {
   };
 }
 
+function parsePedidoId(value) {
+  const id = Number(value);
+
+  if (
+    !Number.isInteger(id) ||
+    id <= 0
+  ) {
+    return null;
+  }
+
+  return id;
+}
+
+function normalizeNullableString(value) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+
+  return String(value).trim();
+}
+
+function normalizeDias(value, fallback = 0) {
+  if (value === undefined) return fallback;
+
+  const dias = Number(value);
+
+  return Number.isFinite(dias)
+    ? Math.max(0, Math.trunc(dias))
+    : fallback;
+}
+
+function normalizePedidoBody(body = {}, current = null) {
+  const currentExtras = current
+    ? normalizeExtras(current.extras)
+    : {};
+
+  const currentEstados = current
+    ? normalizeEstados(current.estados)
+    : [];
+
+  const bodyExtras =
+    body.extras &&
+    typeof body.extras === "object" &&
+    !Array.isArray(body.extras)
+      ? body.extras
+      : null;
+
+  const bodyEstados =
+    Array.isArray(body.estados) &&
+    body.estados.length > 0
+      ? body.estados
+      : null;
+
+  return {
+    cliente: String(
+      body.cliente ??
+        current?.cliente ??
+        ""
+    ).trim(),
+
+    sector: String(
+      body.sector ??
+        current?.sector ??
+        ""
+    ).trim(),
+
+    prioridad: String(
+      body.prioridad ??
+        current?.prioridad ??
+        "OK"
+    ).trim(),
+
+    dias: normalizeDias(
+      body.dias,
+      Number(current?.dias) || 0
+    ),
+
+    estados:
+      bodyEstados ??
+      (currentEstados.length > 0
+        ? currentEstados
+        : [
+            {
+              estado: "PENDIENTE",
+              at: new Date().toISOString(),
+            },
+          ]),
+
+    extras: bodyExtras
+      ? {
+          ...currentExtras,
+          ...bodyExtras,
+        }
+      : currentExtras,
+
+    fecha:
+      body.fecha ??
+      current?.fecha ??
+      new Date().toISOString(),
+  };
+}
+
+function sendDatabaseError(
+  res,
+  error,
+  publicMessage
+) {
+  console.error(publicMessage, {
+    message: error?.message,
+    code: error?.code,
+    detail: error?.detail,
+  });
+
+  const isPoolTimeout =
+    String(error?.message || "")
+      .toLowerCase()
+      .includes(
+        "timeout exceeded when trying to connect"
+      );
+
+  return res
+    .status(isPoolTimeout ? 503 : 500)
+    .json({
+      ok: false,
+      message: isPoolTimeout
+        ? "La base de datos está ocupada. Intentá nuevamente."
+        : publicMessage,
+      code: error?.code ?? null,
+    });
+}
+
 export async function getPedidos(_req, res) {
   try {
     const result = await pool.query(`
-      SELECT *
+      SELECT ${PEDIDO_COLUMNS}
       FROM pedidos
-      ORDER BY fecha DESC, id DESC
+      ORDER BY fecha DESC NULLS LAST, id DESC
     `);
 
-    res.json(result.rows.map(mapPedido));
+    return res.json(
+      result.rows.map(mapPedido)
+    );
   } catch (error) {
-    console.error("Error getPedidos:", error);
-    res.status(500).json({
-      ok: false,
-      message: "Error al obtener pedidos",
-      detail: error.message,
-    });
+    return sendDatabaseError(
+      res,
+      error,
+      "Error al obtener pedidos"
+    );
   }
 }
 
-export async function getPedidoById(req, res) {
+export async function getPedidoById(
+  req,
+  res
+) {
+  const id = parsePedidoId(req.params.id);
+
+  if (!id) {
+    return res.status(400).json({
+      ok: false,
+      message: "ID inválido",
+    });
+  }
+
   try {
-    const id = Number(req.params.id);
-
-    if (!Number.isFinite(id)) {
-      return res.status(400).json({
-        ok: false,
-        message: "ID inválido",
-      });
-    }
-
     const result = await pool.query(
       `
-      SELECT *
+      SELECT ${PEDIDO_COLUMNS}
       FROM pedidos
       WHERE id = $1
+      LIMIT 1
       `,
       [id]
     );
@@ -133,59 +309,32 @@ export async function getPedidoById(req, res) {
       });
     }
 
-    res.json(mapPedido(result.rows[0]));
+    return res.json(
+      mapPedido(result.rows[0])
+    );
   } catch (error) {
-    console.error("Error getPedidoById:", error);
-    res.status(500).json({
-      ok: false,
-      message: "Error al obtener pedido",
-      detail: error.message,
-    });
+    return sendDatabaseError(
+      res,
+      error,
+      "Error al obtener pedido"
+    );
   }
 }
 
-function normalizePedidoBody(body, current = null) {
-  const currentExtras = current ? normalizeExtras(current.extras) : {};
-  const currentEstados = current ? normalizeEstados(current.estados) : [];
-
-  return {
-    cliente: String(body.cliente ?? current?.cliente ?? "").trim(),
-    sector: String(body.sector ?? current?.sector ?? "").trim(),
-    prioridad: String(body.prioridad ?? current?.prioridad ?? "OK").trim(),
-    dias: Number(body.dias ?? current?.dias ?? 0) || 0,
-    estados:
-      Array.isArray(body.estados) && body.estados.length > 0
-        ? body.estados
-        : currentEstados.length
-        ? currentEstados
-        : [
-            {
-              estado: "PENDIENTE",
-              at: new Date().toISOString(),
-            },
-          ],
-    extras:
-      body.extras && typeof body.extras === "object"
-        ? {
-            ...currentExtras,
-            ...body.extras,
-          }
-        : currentExtras,
-    fecha:
-      body.fecha ??
-      current?.fecha ??
-      new Date().toISOString(),
-  };
-}
-
-export async function createPedido(req, res) {
+export async function createPedido(
+  req,
+  res
+) {
   try {
-    const pedido = normalizePedidoBody(req.body);
+    const pedido = normalizePedidoBody(
+      req.body
+    );
 
     if (!pedido.cliente) {
       return res.status(400).json({
         ok: false,
-        message: "El cliente es obligatorio",
+        message:
+          "El cliente es obligatorio",
       });
     }
 
@@ -194,19 +343,35 @@ export async function createPedido(req, res) {
       pedido.extras?.presupuesto?.id ??
       null;
 
-    if (presupuestoId) {
-      const existing = await pool.query(
-        `
-        SELECT *
-        FROM pedidos
-        WHERE extras->>'presupuestoId' = $1
-        LIMIT 1
-        `,
-        [String(presupuestoId)]
-      );
+    if (
+      presupuestoId !== null &&
+      presupuestoId !== undefined &&
+      String(presupuestoId).trim()
+    ) {
+      const existing =
+        await pool.query(
+          `
+          SELECT ${PEDIDO_COLUMNS}
+          FROM pedidos
+          WHERE
+            extras->>'presupuestoId' = $1
+            OR extras->'presupuesto'->>'id' = $1
+          ORDER BY id DESC
+          LIMIT 1
+          `,
+          [String(presupuestoId).trim()]
+        );
 
-      if (existing.rowCount > 0) {
-        return res.status(200).json(mapPedido(existing.rows[0]));
+      if (
+        existing.rowCount > 0
+      ) {
+        return res
+          .status(200)
+          .json(
+            mapPedido(
+              existing.rows[0]
+            )
+          );
       }
     }
 
@@ -223,259 +388,387 @@ export async function createPedido(req, res) {
         created_at,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, NOW(), NOW())
-      RETURNING *
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5::jsonb,
+        $6::jsonb,
+        $7,
+        NOW(),
+        NOW()
+      )
+      RETURNING ${PEDIDO_COLUMNS}
       `,
       [
         pedido.cliente,
         pedido.sector,
         pedido.prioridad,
         pedido.dias,
-        JSON.stringify(pedido.estados),
-        JSON.stringify(pedido.extras),
+        JSON.stringify(
+          pedido.estados
+        ),
+        JSON.stringify(
+          pedido.extras
+        ),
         pedido.fecha,
       ]
     );
 
-    res.status(201).json(mapPedido(result.rows[0]));
+    return res
+      .status(201)
+      .json(
+        mapPedido(result.rows[0])
+      );
   } catch (error) {
-    console.error("Error createPedido:", error);
-    res.status(500).json({
-      ok: false,
-      message: "Error al crear pedido",
-      detail: error.message,
-    });
+    return sendDatabaseError(
+      res,
+      error,
+      "Error al crear pedido"
+    );
   }
 }
 
-export async function updatePedido(req, res) {
-  try {
-    const id = Number(req.params.id);
+export async function updatePedido(
+  req,
+  res
+) {
+  const id = parsePedidoId(req.params.id);
 
-    if (!Number.isFinite(id)) {
-      return res.status(400).json({
-        ok: false,
-        message: "ID inválido",
-      });
-    }
-
-    const currentResult = await pool.query(
-      `
-      SELECT *
-      FROM pedidos
-      WHERE id = $1
-      `,
-      [id]
-    );
-
-    if (currentResult.rowCount === 0) {
-      return res.status(404).json({
-        ok: false,
-        message: "Pedido no encontrado",
-      });
-    }
-
-    const current = currentResult.rows[0];
-    const pedido = normalizePedidoBody(req.body, current);
-
-    if (!pedido.cliente) {
-      return res.status(400).json({
-        ok: false,
-        message: "El cliente es obligatorio",
-      });
-    }
-
-    const result = await pool.query(
-      `
-      UPDATE pedidos
-      SET
-        cliente = $1,
-        sector = $2,
-        prioridad = $3,
-        dias = $4,
-        estados = $5::jsonb,
-        extras = $6::jsonb,
-        fecha = $7,
-        updated_at = NOW()
-      WHERE id = $8
-      RETURNING *
-      `,
-      [
-        pedido.cliente,
-        pedido.sector,
-        pedido.prioridad,
-        pedido.dias,
-        JSON.stringify(pedido.estados),
-        JSON.stringify(pedido.extras),
-        pedido.fecha,
-        id,
-      ]
-    );
-
-    res.json(mapPedido(result.rows[0]));
-  } catch (error) {
-    console.error("Error updatePedido:", error);
-    res.status(500).json({
+  if (!id) {
+    return res.status(400).json({
       ok: false,
-      message: "Error al actualizar pedido",
-      detail: error.message,
+      message: "ID inválido",
     });
   }
-}
 
-export async function patchPedido(req, res) {
   try {
-    const id = Number(req.params.id);
+    const bodyExtras =
+      req.body?.extras &&
+      typeof req.body.extras === "object" &&
+      !Array.isArray(req.body.extras)
+        ? req.body.extras
+        : {};
 
-    if (!Number.isFinite(id)) {
-      return res.status(400).json({
-        ok: false,
-        message: "ID inválido",
-      });
-    }
-
-    const currentResult = await pool.query(
-      `
-      SELECT *
-      FROM pedidos
-      WHERE id = $1
-      `,
-      [id]
-    );
-
-    if (currentResult.rowCount === 0) {
-      return res.status(404).json({
-        ok: false,
-        message: "Pedido no encontrado",
-      });
-    }
-
-    const current = currentResult.rows[0];
-    const currentExtras = normalizeExtras(current.extras);
-    const currentEstados = normalizeEstados(current.estados);
-
-    const nextExtras =
-      req.body.extras && typeof req.body.extras === "object"
-        ? {
-            ...currentExtras,
-            ...req.body.extras,
-          }
-        : currentExtras;
-
-    const nextEstados =
-      Array.isArray(req.body.estados) && req.body.estados.length > 0
+    const bodyEstados =
+      Array.isArray(
+        req.body?.estados
+      ) &&
+      req.body.estados.length > 0
         ? req.body.estados
-        : currentEstados;
+        : null;
 
     const result = await pool.query(
       `
       UPDATE pedidos
       SET
-        cliente = COALESCE($1, cliente),
-        sector = COALESCE($2, sector),
-        prioridad = COALESCE($3, prioridad),
-        dias = COALESCE($4, dias),
-        estados = $5::jsonb,
-        extras = $6::jsonb,
-        fecha = COALESCE($7, fecha),
+        cliente = COALESCE(
+          NULLIF(BTRIM($1), ''),
+          cliente
+        ),
+        sector = COALESCE(
+          $2,
+          sector
+        ),
+        prioridad = COALESCE(
+          NULLIF(BTRIM($3), ''),
+          prioridad
+        ),
+        dias = COALESCE(
+          $4,
+          dias
+        ),
+        estados = CASE
+          WHEN $5::jsonb IS NULL
+            THEN estados
+          ELSE $5::jsonb
+        END,
+        extras = COALESCE(
+          extras,
+          '{}'::jsonb
+        ) || $6::jsonb,
+        fecha = COALESCE(
+          $7,
+          fecha
+        ),
         updated_at = NOW()
       WHERE id = $8
-      RETURNING *
+      RETURNING ${PEDIDO_COLUMNS}
       `,
       [
-        req.body.cliente !== undefined ? String(req.body.cliente).trim() : null,
-        req.body.sector !== undefined ? String(req.body.sector).trim() : null,
-        req.body.prioridad !== undefined ? String(req.body.prioridad).trim() : null,
-        req.body.dias !== undefined ? Number(req.body.dias) || 0 : null,
-        JSON.stringify(nextEstados),
-        JSON.stringify(nextExtras),
-        req.body.fecha !== undefined ? req.body.fecha : null,
+        normalizeNullableString(
+          req.body?.cliente
+        ) ?? null,
+        normalizeNullableString(
+          req.body?.sector
+        ) ?? null,
+        normalizeNullableString(
+          req.body?.prioridad
+        ) ?? null,
+        req.body?.dias !== undefined
+          ? normalizeDias(
+              req.body.dias,
+              0
+            )
+          : null,
+        bodyEstados
+          ? JSON.stringify(
+              bodyEstados
+            )
+          : null,
+        JSON.stringify(
+          bodyExtras
+        ),
+        req.body?.fecha ??
+          null,
         id,
       ]
     );
 
-    res.json(mapPedido(result.rows[0]));
-  } catch (error) {
-    console.error("Error patchPedido:", error);
-    res.status(500).json({
-      ok: false,
-      message: "Error al actualizar parcialmente pedido",
-      detail: error.message,
-    });
-  }
-}
-
-export async function deletePedido(req, res) {
-  try {
-    const id = Number(req.params.id);
-
-    if (!Number.isFinite(id)) {
-      return res.status(400).json({
-        ok: false,
-        message: "ID inválido",
-      });
-    }
-
-    const current = await pool.query(
-      `
-      SELECT *
-      FROM pedidos
-      WHERE id = $1
-      `,
-      [id]
-    );
-
-    if (current.rowCount === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({
         ok: false,
         message: "Pedido no encontrado",
       });
     }
 
-    const row = current.rows[0];
-    const estados = normalizeEstados(row.estados);
-    const alreadyCanceled = estados.some(
-      (e) => getEstadoString(e) === "CANCELADO"
+    return res.json(
+      mapPedido(result.rows[0])
     );
+  } catch (error) {
+    return sendDatabaseError(
+      res,
+      error,
+      "Error al actualizar pedido"
+    );
+  }
+}
 
-    const nextEstados = alreadyCanceled
-      ? estados
-      : [
-          ...estados,
-          {
-            estado: "CANCELADO",
-            at: new Date().toISOString(),
-          },
-        ];
+export async function patchPedido(
+  req,
+  res
+) {
+  const id = parsePedidoId(req.params.id);
 
-    const extras = {
-      ...normalizeExtras(row.extras),
-      canceladoAt: new Date().toISOString(),
-    };
+  if (!id) {
+    return res.status(400).json({
+      ok: false,
+      message: "ID inválido",
+    });
+  }
+
+  try {
+    const bodyExtras =
+      req.body?.extras &&
+      typeof req.body.extras === "object" &&
+      !Array.isArray(req.body.extras)
+        ? req.body.extras
+        : {};
+
+    const bodyEstados =
+      Array.isArray(
+        req.body?.estados
+      ) &&
+      req.body.estados.length > 0
+        ? req.body.estados
+        : null;
 
     const result = await pool.query(
       `
       UPDATE pedidos
       SET
-        estados = $1::jsonb,
-        extras = $2::jsonb,
+        cliente = COALESCE(
+          $1,
+          cliente
+        ),
+        sector = COALESCE(
+          $2,
+          sector
+        ),
+        prioridad = COALESCE(
+          $3,
+          prioridad
+        ),
+        dias = COALESCE(
+          $4,
+          dias
+        ),
+        estados = CASE
+          WHEN $5::jsonb IS NULL
+            THEN estados
+          ELSE $5::jsonb
+        END,
+        extras = COALESCE(
+          extras,
+          '{}'::jsonb
+        ) || $6::jsonb,
+        fecha = COALESCE(
+          $7,
+          fecha
+        ),
         updated_at = NOW()
-      WHERE id = $3
-      RETURNING *
+      WHERE id = $8
+      RETURNING ${PEDIDO_COLUMNS}
       `,
-      [JSON.stringify(nextEstados), JSON.stringify(extras), id]
+      [
+        req.body?.cliente !==
+        undefined
+          ? String(
+              req.body.cliente
+            ).trim()
+          : null,
+
+        req.body?.sector !==
+        undefined
+          ? String(
+              req.body.sector
+            ).trim()
+          : null,
+
+        req.body?.prioridad !==
+        undefined
+          ? String(
+              req.body.prioridad
+            ).trim()
+          : null,
+
+        req.body?.dias !==
+        undefined
+          ? normalizeDias(
+              req.body.dias,
+              0
+            )
+          : null,
+
+        bodyEstados
+          ? JSON.stringify(
+              bodyEstados
+            )
+          : null,
+
+        JSON.stringify(
+          bodyExtras
+        ),
+
+        req.body?.fecha !==
+        undefined
+          ? req.body.fecha
+          : null,
+
+        id,
+      ]
     );
 
-    res.json({
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        ok: false,
+        message: "Pedido no encontrado",
+      });
+    }
+
+    return res.json(
+      mapPedido(result.rows[0])
+    );
+  } catch (error) {
+    return sendDatabaseError(
+      res,
+      error,
+      "Error al actualizar parcialmente pedido"
+    );
+  }
+}
+
+export async function deletePedido(
+  req,
+  res
+) {
+  const id = parsePedidoId(req.params.id);
+
+  if (!id) {
+    return res.status(400).json({
+      ok: false,
+      message: "ID inválido",
+    });
+  }
+
+  try {
+    const canceladoAt =
+      new Date().toISOString();
+
+    const result = await pool.query(
+      `
+      UPDATE pedidos
+      SET
+        estados = CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(
+              CASE
+                WHEN jsonb_typeof(estados) = 'array'
+                  THEN estados
+                ELSE '[]'::jsonb
+              END
+            ) AS item
+            WHERE UPPER(
+              COALESCE(
+                item->>'estado',
+                item #>> '{}',
+                ''
+              )
+            ) = 'CANCELADO'
+          )
+            THEN estados
+          ELSE
+            CASE
+              WHEN jsonb_typeof(estados) = 'array'
+                THEN estados
+              ELSE '[]'::jsonb
+            END
+            ||
+            jsonb_build_array(
+              jsonb_build_object(
+                'estado',
+                'CANCELADO',
+                'at',
+                $1::text
+              )
+            )
+        END,
+        extras = COALESCE(
+          extras,
+          '{}'::jsonb
+        ) || jsonb_build_object(
+          'cancelado',
+          true,
+          'canceladoAt',
+          $1::text
+        ),
+        updated_at = NOW()
+      WHERE id = $2
+      RETURNING ${PEDIDO_COLUMNS}
+      `,
+      [canceladoAt, id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        ok: false,
+        message: "Pedido no encontrado",
+      });
+    }
+
+    return res.json({
       ok: true,
-      pedido: mapPedido(result.rows[0]),
+      pedido: mapPedido(
+        result.rows[0]
+      ),
     });
   } catch (error) {
-    console.error("Error deletePedido:", error);
-    res.status(500).json({
-      ok: false,
-      message: "Error al cancelar pedido",
-      detail: error.message,
-    });
+    return sendDatabaseError(
+      res,
+      error,
+      "Error al cancelar pedido"
+    );
   }
 }

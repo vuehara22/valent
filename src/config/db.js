@@ -5,45 +5,38 @@ dotenv.config();
 
 const { Pool } = pg;
 
-const poolConfig = process.env.DATABASE_URL
+const isRender = Boolean(process.env.DATABASE_URL);
+
+const commonConfig = {
+  max: Number(process.env.DB_POOL_MAX || 8),
+  min: 0,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 15000,
+  query_timeout: 30000,
+  statement_timeout: 30000,
+  keepAlive: true,
+  allowExitOnIdle: false,
+};
+
+const poolConfig = isRender
   ? {
+      ...commonConfig,
       connectionString: process.env.DATABASE_URL,
       ssl: {
         rejectUnauthorized: false,
       },
-      max: 5,
-      min: 0,
-      idleTimeoutMillis: 10000,
-      connectionTimeoutMillis: 10000,
-      query_timeout: 30000,
-      statement_timeout: 30000,
-      allowExitOnIdle: false,
     }
   : {
+      ...commonConfig,
       host: process.env.DB_HOST || "localhost",
       port: Number(process.env.DB_PORT || 5432),
       user: process.env.DB_USER || "postgres",
       password: String(process.env.DB_PASSWORD || ""),
       database: process.env.DB_NAME || "valent",
       ssl: false,
-      max: 5,
-      min: 0,
-      idleTimeoutMillis: 10000,
-      connectionTimeoutMillis: 10000,
-      query_timeout: 30000,
-      statement_timeout: 30000,
-      allowExitOnIdle: false,
     };
 
 export const pool = new Pool(poolConfig);
-
-pool.on("connect", () => {
-  console.log(
-    process.env.DATABASE_URL
-      ? "🟢 Conectado a PostgreSQL de Render"
-      : "🟢 Conectado a PostgreSQL local"
-  );
-});
 
 pool.on("error", (error) => {
   console.error("🔴 Error inesperado en PostgreSQL:", {
@@ -54,22 +47,37 @@ pool.on("error", (error) => {
 
 export async function testDatabaseConnection() {
   try {
-    const result = await pool.query("SELECT NOW() AS fecha_actual");
+    const result = await pool.query(
+      "SELECT NOW() AS fecha_actual"
+    );
 
     console.log(
-      "🟢 Base de datos conectada correctamente:",
+      isRender
+        ? "🟢 PostgreSQL de Render conectado:"
+        : "🟢 PostgreSQL local conectado:",
       result.rows[0].fecha_actual
     );
 
     return true;
   } catch (error) {
-    console.error("🔴 Error al conectar con la base de datos:", {
-      message: error?.message,
-      code: error?.code,
-    });
+    console.error(
+      "🔴 Error al conectar con PostgreSQL:",
+      {
+        message: error?.message,
+        code: error?.code,
+      }
+    );
 
     return false;
   }
+}
+
+export function getPoolStatus() {
+  return {
+    total: pool.totalCount,
+    libres: pool.idleCount,
+    esperando: pool.waitingCount,
+  };
 }
 
 export default pool;

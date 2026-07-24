@@ -1,5 +1,26 @@
 import { pool } from "../config/db.js";
 
+function sendDatabaseError(res, error, message) {
+  const isPoolTimeout = String(error?.message || "")
+    .toLowerCase()
+    .includes("timeout exceeded when trying to connect");
+
+  console.error(message, {
+    message: error?.message,
+    code: error?.code,
+  });
+
+  return res.status(isPoolTimeout ? 503 : 500).json({
+    error: isPoolTimeout
+      ? "La base de datos está ocupada. Intentá nuevamente."
+      : message,
+    detalle:
+      process.env.NODE_ENV === "development"
+        ? error?.message
+        : undefined,
+  });
+}
+
 function clean(value) {
   return String(value ?? "").trim();
 }
@@ -212,8 +233,9 @@ async function existeClienteDuplicado({
   cuit,
   dni,
   email,
+  db = pool,
 }) {
-  const result = await pool.query(
+  const result = await db.query(
     `
     SELECT id, nombre, cuit, dni, email
     FROM clientes
@@ -254,7 +276,30 @@ async function existeClienteDuplicado({
 export async function getClientes(_req, res) {
   try {
     const result = await pool.query(`
-      SELECT *
+      SELECT
+        id,
+        nombre,
+        direccion,
+        localidad,
+        telefono,
+        condicion_iva,
+        cuit,
+        direccion_envio,
+        direccion_facturacion,
+        nombre_apellido,
+        dni,
+        email,
+        expreso,
+        nota_envio_optica,
+        nota_envio_recibe,
+        nota_envio_domicilio,
+        nota_envio_localidad,
+        nota_envio_telefono,
+        nota_envio_cuit_dni,
+        nota_envio_horario,
+        archivos_cliente,
+        created_at,
+        updated_at
       FROM clientes
       ORDER BY nombre ASC, id ASC
     `);
@@ -265,15 +310,11 @@ export async function getClientes(_req, res) {
         .filter(Boolean)
     );
   } catch (error) {
-    console.error("Error al obtener clientes:", error);
-
-    return res.status(500).json({
-      error: "Error al obtener clientes",
-      detalle:
-        process.env.NODE_ENV === "development"
-          ? error.message
-          : undefined,
-    });
+    return sendDatabaseError(
+      res,
+      error,
+      "Error al obtener clientes"
+    );
   }
 }
 
@@ -292,7 +333,30 @@ export async function getClientePorId(req, res) {
 
     const result = await pool.query(
       `
-      SELECT *
+      SELECT
+        id,
+        nombre,
+        direccion,
+        localidad,
+        telefono,
+        condicion_iva,
+        cuit,
+        direccion_envio,
+        direccion_facturacion,
+        nombre_apellido,
+        dni,
+        email,
+        expreso,
+        nota_envio_optica,
+        nota_envio_recibe,
+        nota_envio_domicilio,
+        nota_envio_localidad,
+        nota_envio_telefono,
+        nota_envio_cuit_dni,
+        nota_envio_horario,
+        archivos_cliente,
+        created_at,
+        updated_at
       FROM clientes
       WHERE id = $1
       LIMIT 1
@@ -480,9 +544,10 @@ export async function crearCliente(req, res) {
 }
 
 export async function actualizarCliente(req, res) {
-  const client = await pool.connect();
+  let client;
 
   try {
+    client = await pool.connect();
     const clienteId = Number(req.params.id);
     const c = req.body ?? {};
 
@@ -529,6 +594,7 @@ export async function actualizarCliente(req, res) {
       cuit: c.cuit,
       dni: c.dni,
       email: c.email,
+      db: client,
     });
 
     if (duplicado) {
@@ -675,7 +741,9 @@ export async function actualizarCliente(req, res) {
           : undefined,
     });
   } finally {
-    client.release();
+    if (client) {
+      client.release();
+    }
   }
 }
 
