@@ -5,14 +5,19 @@ dotenv.config();
 
 const { Pool } = pg;
 
-const isProduction = process.env.NODE_ENV === "production";
-
 const poolConfig = process.env.DATABASE_URL
   ? {
       connectionString: process.env.DATABASE_URL,
       ssl: {
         rejectUnauthorized: false,
       },
+      max: 5,
+      min: 0,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 10000,
+      query_timeout: 30000,
+      statement_timeout: 30000,
+      allowExitOnIdle: false,
     }
   : {
       host: process.env.DB_HOST || "localhost",
@@ -21,6 +26,13 @@ const poolConfig = process.env.DATABASE_URL
       password: String(process.env.DB_PASSWORD || ""),
       database: process.env.DB_NAME || "valent",
       ssl: false,
+      max: 5,
+      min: 0,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 10000,
+      query_timeout: 30000,
+      statement_timeout: 30000,
+      allowExitOnIdle: false,
     };
 
 export const pool = new Pool(poolConfig);
@@ -34,7 +46,10 @@ pool.on("connect", () => {
 });
 
 pool.on("error", (error) => {
-  console.error("🔴 Error inesperado en PostgreSQL:", error);
+  console.error("🔴 Error inesperado en PostgreSQL:", {
+    message: error?.message,
+    code: error?.code,
+  });
 });
 
 export async function testDatabaseConnection() {
@@ -48,10 +63,10 @@ export async function testDatabaseConnection() {
 
     return true;
   } catch (error) {
-    console.error(
-      "🔴 Error al conectar con la base de datos:",
-      error.message
-    );
+    console.error("🔴 Error al conectar con la base de datos:", {
+      message: error?.message,
+      code: error?.code,
+    });
 
     return false;
   }
