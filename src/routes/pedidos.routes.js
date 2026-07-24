@@ -69,13 +69,11 @@ function normalizePedidoBody(body) {
     prioridad: String(body.prioridad || "OK").trim(),
     dias: Number(body.dias) || 0,
     estados:
-      Array.isArray(body.estados) &&
-      body.estados.length > 0
+      Array.isArray(body.estados) && body.estados.length > 0
         ? body.estados
         : ["PENDIENTE"],
     extras:
-      body.extras &&
-      typeof body.extras === "object"
+      body.extras && typeof body.extras === "object"
         ? body.extras
         : {},
     fecha: body.fecha || new Date().toISOString(),
@@ -114,22 +112,12 @@ function responderErrorBase(res, error, mensaje) {
 }
 
 /* =========================================================
-   LISTAR PEDIDOS
+   LISTAR TODOS LOS PEDIDOS
 ========================================================= */
 
-router.get("/", async (req, res) => {
+router.get("/", async (_req, res) => {
   try {
-    const requestedLimit = Number(req.query.limit);
-
-    const limit = Number.isFinite(requestedLimit)
-      ? Math.min(
-          Math.max(requestedLimit, 1),
-          100
-        )
-      : 50;
-
-    const result = await pool.query(
-      `
+    const result = await pool.query(`
       SELECT
         id,
         cliente,
@@ -143,10 +131,7 @@ router.get("/", async (req, res) => {
         updated_at
       FROM pedidos
       ORDER BY fecha DESC, id DESC
-      LIMIT $1
-      `,
-      [limit]
-    );
+    `);
 
     const pedidos = result.rows.map((row) =>
       mapPedido(row, {
@@ -249,15 +234,11 @@ router.post(
         });
       }
 
-      const tipo = String(
-        req.body.tipo || "GUIA"
-      )
+      const tipo = String(req.body.tipo || "GUIA")
         .trim()
         .toUpperCase();
 
-      const tag = String(
-        req.body.tag || "LOGISTICA"
-      )
+      const tag = String(req.body.tag || "LOGISTICA")
         .trim()
         .toUpperCase();
 
@@ -330,9 +311,7 @@ router.post(
 
       emitirCambioPedido("ARCHIVO_SUBIDO", {
         pedidoId,
-        sector:
-          pedidoExists.rows[0]?.sector ||
-          null,
+        sector: pedidoExists.rows[0]?.sector || null,
       });
 
       return res.status(201).json({
@@ -376,10 +355,7 @@ router.get(
   async (req, res) => {
     try {
       const pedidoId = Number(req.params.id);
-
-      const archivoId = Number(
-        req.params.archivoId
-      );
+      const archivoId = Number(req.params.archivoId);
 
       if (
         !Number.isFinite(pedidoId) ||
@@ -464,10 +440,7 @@ router.delete(
   async (req, res) => {
     try {
       const pedidoId = Number(req.params.id);
-
-      const archivoId = Number(
-        req.params.archivoId
-      );
+      const archivoId = Number(req.params.archivoId);
 
       if (
         !Number.isFinite(pedidoId) ||
@@ -507,15 +480,10 @@ router.delete(
         });
       }
 
-      emitirCambioPedido(
-        "ARCHIVO_ELIMINADO",
-        {
-          pedidoId,
-          sector:
-            pedidoExists.rows[0]?.sector ||
-            null,
-        }
-      );
+      emitirCambioPedido("ARCHIVO_ELIMINADO", {
+        pedidoId,
+        sector: pedidoExists.rows[0]?.sector || null,
+      });
 
       return res.json({
         ok: true,
@@ -578,9 +546,7 @@ router.get("/:id", async (req, res) => {
       });
     }
 
-    return res.json(
-      mapPedido(result.rows[0])
-    );
+    return res.json(mapPedido(result.rows[0]));
   } catch (error) {
     console.error(
       "Error GET /api/pedidos/:id:",
@@ -604,14 +570,11 @@ router.get("/:id", async (req, res) => {
 
 router.post("/", async (req, res) => {
   try {
-    const pedido = normalizePedidoBody(
-      req.body
-    );
+    const pedido = normalizePedidoBody(req.body);
 
     if (!pedido.cliente) {
       return res.status(400).json({
-        message:
-          "El cliente es obligatorio",
+        message: "El cliente es obligatorio",
       });
     }
 
@@ -652,28 +615,17 @@ router.post("/", async (req, res) => {
         pedido.sector,
         pedido.prioridad,
         pedido.dias,
-        JSON.stringify(
-          pedido.estados
-        ),
-        JSON.stringify(
-          pedido.extras
-        ),
+        JSON.stringify(pedido.estados),
+        JSON.stringify(pedido.extras),
         pedido.fecha,
       ]
     );
 
-    const pedidoCreado = mapPedido(
-      result.rows[0]
-    );
+    const pedidoCreado = mapPedido(result.rows[0]);
 
-    emitirCambioPedido(
-      "CREADO",
-      pedidoCreado
-    );
+    emitirCambioPedido("CREADO", pedidoCreado);
 
-    return res
-      .status(201)
-      .json(pedidoCreado);
+    return res.status(201).json(pedidoCreado);
   } catch (error) {
     console.error(
       "Error POST /api/pedidos:",
@@ -705,14 +657,11 @@ router.put("/:id", async (req, res) => {
       });
     }
 
-    const pedido = normalizePedidoBody(
-      req.body
-    );
+    const pedido = normalizePedidoBody(req.body);
 
     if (!pedido.cliente) {
       return res.status(400).json({
-        message:
-          "El cliente es obligatorio",
+        message: "El cliente es obligatorio",
       });
     }
 
@@ -746,12 +695,8 @@ router.put("/:id", async (req, res) => {
         pedido.sector,
         pedido.prioridad,
         pedido.dias,
-        JSON.stringify(
-          pedido.estados
-        ),
-        JSON.stringify(
-          pedido.extras
-        ),
+        JSON.stringify(pedido.estados),
+        JSON.stringify(pedido.extras),
         pedido.fecha,
         id,
       ]
@@ -772,9 +717,7 @@ router.put("/:id", async (req, res) => {
       pedidoActualizado
     );
 
-    return res.json(
-      pedidoActualizado
-    );
+    return res.json(pedidoActualizado);
   } catch (error) {
     console.error(
       "Error PUT /api/pedidos/:id:",
@@ -806,50 +749,39 @@ router.patch("/:id", async (req, res) => {
       });
     }
 
-    const currentResult =
-      await pool.query(
-        `
-        SELECT
-          estados,
-          extras
-        FROM pedidos
-        WHERE id = $1
-        `,
-        [id]
-      );
+    const currentResult = await pool.query(
+      `
+      SELECT
+        estados,
+        extras
+      FROM pedidos
+      WHERE id = $1
+      `,
+      [id]
+    );
 
-    if (
-      currentResult.rowCount === 0
-    ) {
+    if (currentResult.rowCount === 0) {
       return res.status(404).json({
-        message:
-          "Pedido no encontrado",
+        message: "Pedido no encontrado",
       });
     }
 
-    const current =
-      currentResult.rows[0];
+    const current = currentResult.rows[0];
 
     const nextExtras =
       req.body?.extras &&
-      typeof req.body.extras ===
-        "object"
+      typeof req.body.extras === "object"
         ? {
-            ...(current.extras ||
-              {}),
+            ...(current.extras || {}),
             ...req.body.extras,
           }
         : current.extras || {};
 
     const nextEstados =
-      Array.isArray(
-        req.body.estados
-      ) &&
+      Array.isArray(req.body.estados) &&
       req.body.estados.length > 0
         ? req.body.estados
-        : current.estados || [
-            "PENDIENTE",
-          ];
+        : current.estados || ["PENDIENTE"];
 
     const result = await pool.query(
       `
@@ -872,9 +804,7 @@ router.patch("/:id", async (req, res) => {
         updated_at
       `,
       [
-        JSON.stringify(
-          nextEstados
-        ),
+        JSON.stringify(nextEstados),
         JSON.stringify(nextExtras),
         id,
       ]
@@ -889,9 +819,7 @@ router.patch("/:id", async (req, res) => {
       pedidoActualizado
     );
 
-    return res.json(
-      pedidoActualizado
-    );
+    return res.json(pedidoActualizado);
   } catch (error) {
     console.error(
       "Error PATCH /api/pedidos/:id:",
@@ -928,16 +856,10 @@ router.delete("/:id", async (req, res) => {
       UPDATE pedidos
       SET
         estados =
-          COALESCE(
-            estados,
-            '[]'::jsonb
-          )
+          COALESCE(estados, '[]'::jsonb)
           || '["CANCELADO"]'::jsonb,
         extras = jsonb_set(
-          COALESCE(
-            extras,
-            '{}'::jsonb
-          ),
+          COALESCE(extras, '{}'::jsonb),
           '{canceladoAt}',
           to_jsonb(NOW()::text),
           true
@@ -961,8 +883,7 @@ router.delete("/:id", async (req, res) => {
 
     if (result.rowCount === 0) {
       return res.status(404).json({
-        message:
-          "Pedido no encontrado",
+        message: "Pedido no encontrado",
       });
     }
 
