@@ -1,83 +1,90 @@
-import dotenv from "dotenv";
 import pg from "pg";
+import dotenv from "dotenv";
 
 dotenv.config();
 
 const { Pool } = pg;
 
-const isRender = Boolean(process.env.DATABASE_URL);
+if (!process.env.DATABASE_URL) {
+  throw new Error("Falta DATABASE_URL en el archivo .env");
+}
 
-const commonConfig = {
-  max: Number(process.env.DB_POOL_MAX || 8),
+export const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+
+  ssl: {
+    rejectUnauthorized: false,
+  },
+
+  // No abrir demasiadas conexiones contra Render
+  max: 3,
   min: 0,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 15000,
-  query_timeout: 30000,
-  statement_timeout: 30000,
+
+  // Tiempo para conseguir una conexión libre
+  connectionTimeoutMillis: 30000,
+
+  // Cerrar conexiones inactivas
+  idleTimeoutMillis: 15000,
+
+  // Dar tiempo suficiente para leer el resultado remoto
+  query_timeout: 60000,
+
+  // Tiempo máximo de ejecución dentro de PostgreSQL
+  statement_timeout: 60000,
+
   keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
+
   allowExitOnIdle: false,
-};
+});
 
-const poolConfig = isRender
-  ? {
-      ...commonConfig,
-      connectionString: process.env.DATABASE_URL,
-      ssl: {
-        rejectUnauthorized: false,
-      },
-    }
-  : {
-      ...commonConfig,
-      host: process.env.DB_HOST || "localhost",
-      port: Number(process.env.DB_PORT || 5432),
-      user: process.env.DB_USER || "postgres",
-      password: String(process.env.DB_PASSWORD || ""),
-      database: process.env.DB_NAME || "valent",
-      ssl: false,
-    };
+pool.on("connect", () => {
+  console.log("🟢 Nueva conexión agregada al pool PostgreSQL");
+});
 
-export const pool = new Pool(poolConfig);
+pool.on("acquire", () => {
+  console.log("🔵 Conexión tomada del pool");
+});
+
+pool.on("remove", () => {
+  console.log("🟠 Conexión removida del pool");
+});
 
 pool.on("error", (error) => {
-  console.error("🔴 Error inesperado en PostgreSQL:", {
+  console.error("🔴 Error inesperado del pool PostgreSQL:", {
     message: error?.message,
     code: error?.code,
   });
 });
 
 export async function testDatabaseConnection() {
+  let client;
+
   try {
-    const result = await pool.query(
-      "SELECT NOW() AS fecha_actual"
-    );
+    client = await pool.connect();
+
+    const result = await client.query(`
+      SELECT
+        NOW() AS fecha,
+        current_database() AS database_name
+    `);
 
     console.log(
-      isRender
-        ? "🟢 PostgreSQL de Render conectado:"
-        : "🟢 PostgreSQL local conectado:",
-      result.rows[0].fecha_actual
+      "🟢 PostgreSQL de Render conectado:",
+      result.rows[0]?.fecha
     );
 
     return true;
   } catch (error) {
-    console.error(
-      "🔴 Error al conectar con PostgreSQL:",
-      {
-        message: error?.message,
-        code: error?.code,
-      }
-    );
+    console.error("🔴 Error conectando a PostgreSQL:", {
+      message: error?.message,
+      code: error?.code,
+    });
 
     return false;
+  } finally {
+    client?.release();
   }
-}
-
-export function getPoolStatus() {
-  return {
-    total: pool.totalCount,
-    libres: pool.idleCount,
-    esperando: pool.waitingCount,
-  };
 }
 
 export default pool;
