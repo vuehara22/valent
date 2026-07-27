@@ -1,21 +1,21 @@
 import { Router } from "express";
+
 import {
-  getPresupuestos,
-  getPresupuestoById,
-  crearPresupuesto,
-  actualizarPresupuesto,
-  aprobarPresupuesto,
-  eliminarPresupuesto,
-} from "../controllers/presupuestos.controller.js";
+  getProductos,
+  getProductoById,
+  crearProducto,
+  actualizarProducto,
+  patchProducto,
+  eliminarProducto,
+} from "../controllers/productos.controller.js";
 
 const router = Router();
 
-router.get("/", getPresupuestos);
-router.get("/:id", getPresupuestoById);
-router.post("/", crearPresupuesto);
-router.put("/:id", actualizarPresupuesto);
-router.patch("/:id", actualizarPresupuesto);
-router.patch("/:id/aprobar", aprobarPresupuesto);
-router.delete("/:id", eliminarPresupuesto);
+router.get("/", getProductos);
+router.get("/:id", getProductoById);
+router.post("/", crearProducto);
+router.put("/:id", actualizarProducto);
+router.patch("/:id", patchProducto);
+router.delete("/:id", eliminarProducto);
 
 export default router;

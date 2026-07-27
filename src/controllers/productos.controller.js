@@ -81,7 +81,7 @@ const PRODUCTO_COLUMNS = `
   updated_at
 `;
 
-async function ensureProductosSchema() {
+async function runProductosSchemaInitialization() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS productos (
       id SERIAL PRIMARY KEY,
@@ -178,6 +178,20 @@ async function ensureProductosSchema() {
   `);
 }
 
+let productosSchemaInitializationPromise = null;
+
+export function initializeProductosSchema() {
+  if (!productosSchemaInitializationPromise) {
+    productosSchemaInitializationPromise =
+      runProductosSchemaInitialization().catch((error) => {
+        productosSchemaInitializationPromise = null;
+        throw error;
+      });
+  }
+
+  return productosSchemaInitializationPromise;
+}
+
 async function findProductoDuplicado({ nombre, codigo, excludeId }) {
   const codigoClean = normText(codigo);
   const nombreClean = normText(nombre);
@@ -238,7 +252,6 @@ function getUbicacion(body, previous = {}) {
 
 export async function getProductos(_req, res) {
   try {
-    await ensureProductosSchema();
 
     const result = await pool.query(
       `
@@ -262,7 +275,6 @@ export async function getProductos(_req, res) {
 
 export async function getProductoById(req, res) {
   try {
-    await ensureProductosSchema();
 
     const { id } = req.params;
 
@@ -296,7 +308,6 @@ export async function getProductoById(req, res) {
 
 export async function crearProducto(req, res) {
   try {
-    await ensureProductosSchema();
 
     const nombre = normText(req.body.nombre || req.body.descripcion);
     const codigo = normText(
@@ -483,7 +494,6 @@ export async function crearProducto(req, res) {
 
 export async function actualizarProducto(req, res) {
   try {
-    await ensureProductosSchema();
 
     const { id } = req.params;
 
@@ -650,7 +660,6 @@ export async function actualizarProducto(req, res) {
 
 export async function patchProducto(req, res) {
   try {
-    await ensureProductosSchema();
 
     const { id } = req.params;
 
@@ -821,7 +830,6 @@ export async function patchProducto(req, res) {
 
 export async function eliminarProducto(req, res) {
   try {
-    await ensureProductosSchema();
 
     const { id } = req.params;
 

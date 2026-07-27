@@ -14,6 +14,10 @@ import {
   testDatabaseConnection,
 } from "./src/config/db.js";
 
+import {
+  initializeProductosSchema,
+} from "./src/controllers/productos.controller.js";
+
 import { initRealtime } from "./src/realtime.js";
 
 import clientesRoutes from "./src/routes/clientes.routes.js";
@@ -966,28 +970,30 @@ app.use(
    INICIAR SERVIDOR
 ========================================================= */
 
-server.listen(
-  PORT,
-  async () => {
+async function startServer() {
+  try {
+    const database = await testDatabaseConnection();
+
     console.log(
-      `🚀 SERVER OK http://localhost:${PORT}`
+      "✅ PostgreSQL conectado:",
+      database
     );
 
-    try {
-      const database =
-        await testDatabaseConnection();
-
+    server.listen(PORT, () => {
       console.log(
-        "✅ PostgreSQL conectado:",
-        database
+        `🚀 SERVER OK http://localhost:${PORT}`
       );
-    } catch (error) {
-      console.error(
-        "❌ Error conectando PostgreSQL:",
-        error instanceof Error
-          ? error.message
-          : error
-      );
-    }
+    });
+  } catch (error) {
+    console.error(
+      "❌ No se pudo iniciar el servidor:",
+      error instanceof Error
+        ? error.message
+        : error
+    );
+
+    process.exit(1);
   }
-);
+}
+
+startServer();
