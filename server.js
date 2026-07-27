@@ -11,7 +11,9 @@ import "pdf-parse/worker";
 import { PDFParse } from "pdf-parse";
 
 import {
+  pool,
   testDatabaseConnection,
+  closeDatabasePool,
 } from "./src/config/db.js";
 
 import {
@@ -34,30 +36,108 @@ const PORT = Number(process.env.PORT) || 4000;
 
 const server = http.createServer(app);
 
+let shuttingDown = false;
+
+/* =========================================================
+   CORS
+========================================================= */
+
+const allowedOrigins = String(
+  process.env.CORS_ORIGINS ||
+    "https://valent.cuyenslama.com,http://localhost:5173,http://localhost:3000"
+)
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+function corsOrigin(origin, callback) {
+  /*
+   * Permite herramientas sin origin, como Postman, Render
+   * health checks y algunas peticiones internas.
+   */
+  if (!origin) {
+    return callback(null, true);
+  }
+
+  if (
+    allowedOrigins.includes("*") ||
+    allowedOrigins.includes(origin)
+  ) {
+    return callback(null, true);
+  }
+
+  console.warn("⚠️ Origen bloqueado por CORS:", origin);
+
+  return callback(
+    new Error(`Origen no permitido por CORS: ${origin}`)
+  );
+}
+
+const corsOptions = {
+  origin: corsOrigin,
+
+  methods: [
+    "GET",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "OPTIONS",
+  ],
+
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+  ],
+
+  credentials: true,
+
+  optionsSuccessStatus: 204,
+};
+
 /* =========================================================
    SOCKET.IO
 ========================================================= */
 
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: [
-      "GET",
-      "POST",
-      "PUT",
-      "PATCH",
-      "DELETE",
-    ],
-  },
+  cors: corsOptions,
+
+  /*
+   * Evita mensajes gigantes enviados accidentalmente
+   * mediante Socket.IO.
+   */
+  maxHttpBufferSize: 1 * 1024 * 1024,
+
+  /*
+   * Configuración estable para conexiones remotas.
+   */
+  pingInterval: 25_000,
+  pingTimeout: 20_000,
+
+  transports: [
+    "websocket",
+    "polling",
+  ],
 });
 
 initRealtime(io);
 
 io.on("connection", (socket) => {
-  console.log("Socket conectado:", socket.id);
+  console.log(
+    `🔌 Socket conectado: ${socket.id}. Total: ${io.engine.clientsCount}`
+  );
 
-  socket.on("disconnect", () => {
-    console.log("Socket desconectado:", socket.id);
+  socket.on("disconnect", (reason) => {
+    console.log(
+      `🔌 Socket desconectado: ${socket.id}. Motivo: ${reason}. Total: ${io.engine.clientsCount}`
+    );
+  });
+
+  socket.on("error", (error) => {
+    console.error("Error de Socket.IO:", {
+      socketId: socket.id,
+      message: error?.message || "Error desconocido",
+    });
   });
 });
 
@@ -65,54 +145,62 @@ io.on("connection", (socket) => {
    MIDDLEWARES GENERALES
 ========================================================= */
 
-app.use(
-  cors({
-    origin: "*",
-    methods: [
-      "GET",
-      "POST",
-      "PUT",
-      "PATCH",
-      "DELETE",
-      "OPTIONS",
-    ],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-    ],
-  })
-);
+app.disable("x-powered-by");
 
-/*
- * Los logos y archivos DXF viajan dentro de archivosCliente
- * codificados como Base64.
- *
- * Base64 aumenta aproximadamente un 33 % el tamaño original,
- * por eso usamos un límite de 50 MB.
- */
+app.use(cors(corsOptions));
+
 app.use(
   express.json({
-    limit: "50mb",
+    limit: "20mb",
   })
 );
 
 app.use(
   express.urlencoded({
     extended: true,
-    limit: "50mb",
+    limit: "20mb",
+    parameterLimit: 5_000,
   })
 );
+
+/* =========================================================
+   LOG DE PETICIONES LENTAS
+========================================================= */
+
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+
+  res.on("finish", () => {
+    const duration = Date.now() - startedAt;
+
+    if (duration >= 5_000) {
+      console.warn("🐌 Petición lenta:", {
+        method: req.method,
+        path: req.originalUrl,
+        status: res.statusCode,
+        durationMs: duration,
+      });
+    }
+  });
+
+  next();
+});
 
 /* =========================================================
    CONFIGURACIÓN DE MULTER PARA PDF
 ========================================================= */
 
 const upload = multer({
+  /*
+   * memoryStorage conserva todo el PDF en memoria.
+   * Por eso limitamos el archivo a 12 MB.
+   */
   storage: multer.memoryStorage(),
 
   limits: {
-    fileSize: 25 * 1024 * 1024,
+    fileSize: 12 * 1024 * 1024,
     files: 1,
+    fields: 20,
   },
 
   fileFilter: (_req, file, callback) => {
@@ -137,6 +225,71 @@ const upload = multer({
 });
 
 /* =========================================================
+   MONITOREO DE MEMORIA
+========================================================= */
+
+/*
+ * Un único intervalo global.
+ *
+ * No colocar este bloque dentro de:
+ * - io.on("connection")
+ * - un controlador
+ * - una ruta
+ * - una función que se ejecute más de una vez
+ */
+const memoryMonitor = setInterval(() => {
+  const memory = process.memoryUsage();
+
+  const stats = {
+    rssMB: Math.round(
+      memory.rss / 1024 / 1024
+    ),
+
+    heapUsedMB: Math.round(
+      memory.heapUsed / 1024 / 1024
+    ),
+
+    heapTotalMB: Math.round(
+      memory.heapTotal / 1024 / 1024
+    ),
+
+    externalMB: Math.round(
+      memory.external / 1024 / 1024
+    ),
+
+    arrayBuffersMB: Math.round(
+      memory.arrayBuffers / 1024 / 1024
+    ),
+
+    sockets: io.engine.clientsCount,
+
+    pool: {
+      total: pool.totalCount,
+      libres: pool.idleCount,
+      esperando: pool.waitingCount,
+    },
+  };
+
+  console.log("🧠 ESTADO DEL SERVIDOR:", stats);
+
+  /*
+   * Aviso anticipado. No reinicia el servidor, pero deja
+   * registrado cuándo empieza a crecer demasiado.
+   */
+  if (stats.rssMB >= 350) {
+    console.warn(
+      "⚠️ Uso de memoria elevado:",
+      stats
+    );
+  }
+}, 60_000);
+
+/*
+ * El intervalo no mantiene el proceso abierto por sí solo.
+ */
+memoryMonitor.unref();
+
+/* =========================================================
    RUTAS GENERALES
 ========================================================= */
 
@@ -153,11 +306,35 @@ app.get("/api/health", async (_req, res) => {
     const database =
       await testDatabaseConnection();
 
+    const memory =
+      process.memoryUsage();
+
     return res.json({
       ok: true,
+
       message:
         "API y PostgreSQL funcionando",
+
       database,
+
+      memory: {
+        rssMB: Math.round(
+          memory.rss / 1024 / 1024
+        ),
+
+        heapUsedMB: Math.round(
+          memory.heapUsed / 1024 / 1024
+        ),
+      },
+
+      sockets:
+        io.engine.clientsCount,
+
+      pool: {
+        total: pool.totalCount,
+        libres: pool.idleCount,
+        esperando: pool.waitingCount,
+      },
     });
   } catch (error) {
     console.error(
@@ -165,10 +342,12 @@ app.get("/api/health", async (_req, res) => {
       error
     );
 
-    return res.status(500).json({
+    return res.status(503).json({
       ok: false,
+
       message:
         "La API funciona, pero PostgreSQL no está conectado",
+
       error:
         error instanceof Error
           ? error.message
@@ -242,13 +421,9 @@ function parseMoneyAR(value) {
 function extractNumero(text) {
   const patterns = [
     /N[°º]?:\s*([0-9]+)/i,
-
     /Presupuesto\s*N[°º]?:?\s*([0-9]+)/i,
-
     /Nro\.?\s*Presupuesto\s*:?\s*([0-9]+)/i,
-
     /Remito\s*N[°º]?:?\s*([0-9]+)/i,
-
     /Nro\.?\s*Remito\s*:?\s*([0-9]+)/i,
   ];
 
@@ -266,9 +441,7 @@ function extractNumero(text) {
 function extractFecha(text) {
   const patterns = [
     /Fecha:\s*(\d{2}\/\d{2}\/\d{4})/i,
-
     /Fecha\s+(\d{2}\/\d{2}\/\d{4})/i,
-
     /(\d{2}\/\d{2}\/\d{4})/,
   ];
 
@@ -452,9 +625,7 @@ function normalizeParsedItem(item) {
   };
 }
 
-function extractItemsFromLines(
-  rawText
-) {
+function extractItemsFromLines(rawText) {
   const items = [];
 
   const lines = String(
@@ -476,13 +647,14 @@ function extractItemsFromLines(
     if (match) {
       items.push(
         normalizeParsedItem({
-          cantidad: parseMoneyAR(
-            match[1]
-          ),
+          cantidad:
+            parseMoneyAR(match[1]),
 
-          codigo: match[2],
+          codigo:
+            match[2],
 
-          descripcion: match[3],
+          descripcion:
+            match[3],
 
           precioUnitario:
             parseMoneyAR(match[4]),
@@ -499,13 +671,14 @@ function extractItemsFromLines(
     if (match) {
       items.push(
         normalizeParsedItem({
-          cantidad: parseMoneyAR(
-            match[3]
-          ),
+          cantidad:
+            parseMoneyAR(match[3]),
 
-          codigo: match[1],
+          codigo:
+            match[1],
 
-          descripcion: match[2],
+          descripcion:
+            match[2],
 
           precioUnitario:
             parseMoneyAR(match[4]),
@@ -517,9 +690,7 @@ function extractItemsFromLines(
   return items;
 }
 
-function extractItemsFallback(
-  rawText
-) {
+function extractItemsFallback(rawText) {
   const lines = String(
     rawText || ""
   )
@@ -550,7 +721,8 @@ function extractItemsFallback(
         codigo:
           codeMatch?.[1] || "",
 
-        descripcion: line,
+        descripcion:
+          line,
 
         precioUnitario:
           priceMatch
@@ -636,6 +808,13 @@ app.post(
         req.file.buffer
       );
 
+      /*
+       * Liberamos la referencia al Buffer apenas termina
+       * la lectura del PDF.
+       */
+      req.file.buffer =
+        Buffer.alloc(0);
+
       const remitoNumero =
         extractNumero(text);
 
@@ -686,7 +865,8 @@ app.post(
         ok: true,
 
         parsed: {
-          numero: remitoNumero,
+          numero:
+            remitoNumero,
 
           remitoNro:
             remitoNumero,
@@ -729,6 +909,11 @@ app.post(
         },
       });
     } catch (error) {
+      if (req.file?.buffer) {
+        req.file.buffer =
+          Buffer.alloc(0);
+      }
+
       console.error(
         "Error parseando remito:",
         error
@@ -769,6 +954,9 @@ app.post(
       } = await obtenerTextoPdf(
         req.file.buffer
       );
+
+      req.file.buffer =
+        Buffer.alloc(0);
 
       const numero =
         extractNumero(text);
@@ -829,7 +1017,8 @@ app.post(
         parsed: {
           numero,
 
-          remitoNro: numero,
+          remitoNro:
+            numero,
 
           fecha,
 
@@ -863,6 +1052,11 @@ app.post(
         },
       });
     } catch (error) {
+      if (req.file?.buffer) {
+        req.file.buffer =
+          Buffer.alloc(0);
+      }
+
       console.error(
         "Error parseando presupuesto:",
         error
@@ -907,7 +1101,19 @@ app.use(
   ) => {
     console.error(
       "Error general del servidor:",
-      error
+      {
+        message:
+          error?.message ||
+          "Error desconocido",
+
+        code:
+          error?.code ||
+          null,
+
+        type:
+          error?.type ||
+          null,
+      }
     );
 
     if (
@@ -920,16 +1126,20 @@ app.use(
       ) {
         return res.status(413).json({
           ok: false,
+
           error:
-            "El PDF supera el límite permitido de 25 MB",
+            "El PDF supera el límite permitido de 12 MB",
         });
       }
 
       return res.status(400).json({
         ok: false,
+
         error:
           "Error al cargar el archivo",
-        detail: error.message,
+
+        detail:
+          error.message,
       });
     }
 
@@ -939,8 +1149,20 @@ app.use(
     ) {
       return res.status(413).json({
         ok: false,
+
         error:
-          "Los archivos superan el límite permitido de 50 MB",
+          "La petición supera el límite permitido de 20 MB",
+      });
+    }
+
+    if (
+      String(error?.message || "").startsWith(
+        "Origen no permitido por CORS"
+      )
+    ) {
+      return res.status(403).json({
+        ok: false,
+        error: error.message,
       });
     }
 
@@ -967,21 +1189,148 @@ app.use(
 );
 
 /* =========================================================
+   CIERRE ORDENADO
+========================================================= */
+
+async function shutdown(signal) {
+  if (shuttingDown) {
+    return;
+  }
+
+  shuttingDown = true;
+
+  console.log(
+    `\n🟡 ${signal}: cerrando servidor...`
+  );
+
+  clearInterval(memoryMonitor);
+
+  /*
+   * Deja de aceptar conexiones nuevas y espera que las
+   * peticiones actuales terminen.
+   */
+  server.close(async (serverError) => {
+    if (serverError) {
+      console.error(
+        "Error cerrando el servidor HTTP:",
+        serverError
+      );
+    }
+
+    try {
+      io.close();
+    } catch (error) {
+      console.error(
+        "Error cerrando Socket.IO:",
+        error
+      );
+    }
+
+    await closeDatabasePool();
+
+    console.log(
+      "✅ Servidor cerrado correctamente."
+    );
+
+    process.exit(
+      serverError ? 1 : 0
+    );
+  });
+
+  /*
+   * Evita que el proceso quede bloqueado indefinidamente.
+   */
+  const forceShutdown =
+    setTimeout(async () => {
+      console.error(
+        "🔴 Cierre forzado después de 10 segundos."
+      );
+
+      try {
+        io.close();
+      } catch {
+        // Ignorado durante cierre forzado.
+      }
+
+      await closeDatabasePool();
+
+      process.exit(1);
+    }, 10_000);
+
+  forceShutdown.unref();
+}
+
+process.once(
+  "SIGINT",
+  () => {
+    void shutdown("SIGINT");
+  }
+);
+
+process.once(
+  "SIGTERM",
+  () => {
+    void shutdown("SIGTERM");
+  }
+);
+
+process.on(
+  "unhandledRejection",
+  (reason) => {
+    console.error(
+      "🔴 Promesa rechazada sin manejar:",
+      reason
+    );
+  }
+);
+
+process.on(
+  "uncaughtException",
+  (error) => {
+    console.error(
+      "🔴 Excepción no controlada:",
+      error
+    );
+
+    void shutdown(
+      "uncaughtException"
+    );
+  }
+);
+
+/* =========================================================
    INICIAR SERVIDOR
 ========================================================= */
 
 async function startServer() {
   try {
-    const database = await testDatabaseConnection();
+    const database =
+      await testDatabaseConnection();
 
     console.log(
       "✅ PostgreSQL conectado:",
       database
     );
 
-    server.listen(PORT, () => {
+    /*
+     * Se ejecuta una sola vez al iniciar.
+     * No debe ejecutarse en cada GET /api/productos.
+     */
+    await initializeProductosSchema();
+
+    console.log(
+      "✅ Esquema de productos verificado"
+    );
+
+    server.listen(PORT, "0.0.0.0", () => {
       console.log(
-        `🚀 SERVER OK http://localhost:${PORT}`
+        `🚀 SERVER OK en puerto ${PORT}`
+      );
+
+      console.log(
+        "🌐 Entorno:",
+        process.env.NODE_ENV ||
+          "development"
       );
     });
   } catch (error) {
@@ -992,8 +1341,10 @@ async function startServer() {
         : error
     );
 
+    await closeDatabasePool();
+
     process.exit(1);
   }
 }
 
-startServer();
+void startServer();

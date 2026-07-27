@@ -27,34 +27,31 @@ export const pool = new Pool({
     : false,
 
   /*
-   * Cinco conexiones permiten que clientes, pedidos,
-   * presupuestos, productos y usuarios consulten sin
-   * bloquear inmediatamente el pool.
+   * Mantener un pool pequeño es importante para Render.
+   * Cinco conexiones son suficientes para esta aplicación
+   * y evitan un consumo excesivo de memoria.
    */
   max: 5,
   min: 0,
 
   /*
-   * Tiempo máximo para conseguir una conexión libre.
-   * No es el tiempo máximo de ejecución de una consulta.
+   * Tiempo máximo para esperar una conexión libre.
    */
-  connectionTimeoutMillis: 15000,
+  connectionTimeoutMillis: 10_000,
 
   /*
-   * Las conexiones sin actividad se pueden cerrar
-   * después de treinta segundos.
+   * Las conexiones inactivas se cierran rápidamente.
    */
-  idleTimeoutMillis: 30000,
+  idleTimeoutMillis: 10_000,
 
   /*
-   * Mantiene viva la conexión TCP contra la base remota.
+   * Mantiene activa la conexión TCP con PostgreSQL.
    */
   keepAlive: true,
-  keepAliveInitialDelayMillis: 10000,
+  keepAliveInitialDelayMillis: 10_000,
 
   /*
-   * El backend continúa activo aunque momentáneamente
-   * no haya conexiones utilizadas.
+   * El proceso continúa activo aunque no haya conexiones.
    */
   allowExitOnIdle: false,
 
@@ -62,35 +59,49 @@ export const pool = new Pool({
 });
 
 /*
- * No agregamos query_timeout.
- * Era el responsable de los errores "Query read timeout"
- * y de que las conexiones fueran descartadas constantemente.
+ * No utilizar setInterval en este archivo.
  *
- * Tampoco aplicamos statement_timeout globalmente porque
- * algunos controllers ejecutan migraciones o verificaciones
- * de esquema que pueden demorar más.
+ * El intervalo anterior se ejecutaba cada dos segundos y podía
+ * duplicarse durante reinicios o recargas del módulo.
+ * El monitoreo de memoria y pool queda centralizado en server.js.
  */
-setInterval(() => {
-  console.log("📊 ESTADO DEL POOL:", {
-    total: pool.totalCount,
-    libres: pool.idleCount,
-    esperando: pool.waitingCount,
-  });
-}, 2000);
+
+pool.on("connect", () => {
+  if (process.env.NODE_ENV !== "production") {
+    console.log("🟢 Nueva conexión PostgreSQL creada");
+  }
+});
+
+pool.on("acquire", () => {
+  if (
+    process.env.NODE_ENV !== "production" &&
+    process.env.DEBUG_DB_POOL === "true"
+  ) {
+    console.log("🔵 Conexión PostgreSQL adquirida");
+  }
+});
+
+pool.on("remove", () => {
+  if (
+    process.env.NODE_ENV !== "production" &&
+    process.env.DEBUG_DB_POOL === "true"
+  ) {
+    console.log("🟡 Conexión PostgreSQL eliminada del pool");
+  }
+});
+
 pool.on("error", (error) => {
-  
   console.error("🔴 Error inesperado del pool PostgreSQL:", {
     message: error?.message || "Error desconocido",
     code: error?.code || null,
+    detail: error?.detail || null,
   });
 });
 
 export async function testDatabaseConnection() {
   try {
     /*
-     * Usamos pool.query directamente.
-     * Así la conexión se libera automáticamente sin depender
-     * de un client.release() manual.
+     * pool.query obtiene y libera automáticamente la conexión.
      */
     const result = await pool.query(`
       SELECT
@@ -101,44 +112,40 @@ export async function testDatabaseConnection() {
 
     const row = result.rows[0];
 
-    console.log("🟢 PostgreSQL de Render conectado:", row?.fecha);
+    console.log("🟢 PostgreSQL conectado:", row?.fecha);
     console.log("🗄️ Base de datos:", row?.database_name);
+    console.log("👤 Usuario PostgreSQL:", row?.database_user);
 
-    return true;
+    return {
+      connected: true,
+      fecha: row?.fecha ?? null,
+      databaseName: row?.database_name ?? null,
+      databaseUser: row?.database_user ?? null,
+    };
   } catch (error) {
     console.error("🔴 Error conectando a PostgreSQL:", {
       message: error?.message || "Error desconocido",
       code: error?.code || null,
+      detail: error?.detail || null,
     });
 
-    return false;
+    throw error;
   }
 }
 
-/*
- * Permite cerrar correctamente el pool cuando el proceso
- * se detiene manualmente.
- */
-async function closePool(signal) {
+export async function closeDatabasePool() {
   try {
-    console.log(`\n🟡 ${signal}: cerrando pool PostgreSQL...`);
+    console.log("🟡 Cerrando pool PostgreSQL...");
+
     await pool.end();
+
     console.log("✅ Pool PostgreSQL cerrado correctamente.");
   } catch (error) {
     console.error("🔴 Error cerrando el pool PostgreSQL:", {
       message: error?.message || "Error desconocido",
+      code: error?.code || null,
     });
-  } finally {
-    process.exit(0);
   }
 }
-
-process.once("SIGINT", () => {
-  void closePool("SIGINT");
-});
-
-process.once("SIGTERM", () => {
-  void closePool("SIGTERM");
-});
 
 export default pool;
