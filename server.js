@@ -42,13 +42,27 @@ let shuttingDown = false;
    CORS
 ========================================================= */
 
-const allowedOrigins = String(
-  process.env.CORS_ORIGINS ||
-    "https://valent.cuyenslama.com,http://localhost:5173,http://localhost:3000"
+const defaultAllowedOrigins = [
+  "https://valent.cuyenslama.com",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+];
+
+const envAllowedOrigins = String(
+  process.env.CORS_ORIGINS || ""
 )
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
+
+const allowedOrigins = Array.from(
+  new Set([
+    ...defaultAllowedOrigins,
+    ...envAllowedOrigins,
+  ])
+);
 
 function corsOrigin(origin, callback) {
   /*
@@ -88,6 +102,8 @@ const corsOptions = {
   allowedHeaders: [
     "Content-Type",
     "Authorization",
+    "Accept",
+    "X-Idempotency-Key",
   ],
 
   credentials: true,
@@ -148,6 +164,13 @@ io.on("connection", (socket) => {
 app.disable("x-powered-by");
 
 app.use(cors(corsOptions));
+
+/*
+ * Responde explícitamente los preflight OPTIONS.
+ * Se usa una expresión regular porque app.options("*", ...)
+ * puede fallar con versiones nuevas de path-to-regexp.
+ */
+app.options(/.*/, cors(corsOptions));
 
 app.use(
   express.json({
