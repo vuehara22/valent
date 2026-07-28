@@ -167,12 +167,8 @@ function parseArchivosClienteDesdeDB(value) {
 }
 
 /**
- * En los listados NO incluimos archivosCliente para evitar enviar
- * imágenes/DXF en base64 de todos los clientes.
- *
- * Para obtener los archivos:
- * GET /api/clientes/:id
- * o el endpoint específico GET /api/clientes/:id/archivos
+ * Incluye archivosCliente porque los sectores y PedidosPro
+ * necesitan recibir LOGO y DXF desde GET /api/clientes.
  */
 function mapCliente(row, { includeArchivos = true } = {}) {
   if (!row) {
@@ -196,6 +192,7 @@ function mapCliente(row, { includeArchivos = true } = {}) {
     dni: row.dni || "",
     email: row.email || "",
     expreso: row.expreso || "",
+    transporte: row.transporte || "",
 
     notaEnvioOptica: row.nota_envio_optica || "",
     notaEnvioRecibe: row.nota_envio_recibe || "",
@@ -309,12 +306,12 @@ async function existeClienteDuplicado({
 }
 
 /**
- * LISTADO LIVIANO
+ * LISTADO COMPLETO
  *
  * Importante:
- * - NO selecciona archivos_cliente.
- * - Devuelve archivosCliente: [].
- * - Devuelve cantidadArchivos sin traer los base64.
+ * - Incluye archivos_cliente.
+ * - Devuelve archivosCliente con LOGO y DXF.
+ * - Esto mantiene compatibles PedidosPro y todos los sectores.
  */
 export async function getClientes(_req, res) {
   const startedAt = Date.now();
@@ -335,6 +332,7 @@ export async function getClientes(_req, res) {
         dni,
         email,
         expreso,
+        transporte,
         nota_envio_optica,
         nota_envio_recibe,
         nota_envio_domicilio,
@@ -342,6 +340,7 @@ export async function getClientes(_req, res) {
         nota_envio_telefono,
         nota_envio_cuit_dni,
         nota_envio_horario,
+        archivos_cliente,
         CASE
           WHEN archivos_cliente IS NULL THEN 0
           WHEN jsonb_typeof(archivos_cliente) = 'array'
@@ -357,7 +356,7 @@ export async function getClientes(_req, res) {
     const clientes = result.rows
       .map((row) =>
         mapCliente(row, {
-          includeArchivos: false,
+          includeArchivos: true,
         })
       )
       .filter(Boolean);
@@ -416,6 +415,7 @@ export async function getClientePorId(req, res) {
         dni,
         email,
         expreso,
+        transporte,
         nota_envio_optica,
         nota_envio_recibe,
         nota_envio_domicilio,
@@ -559,6 +559,7 @@ export async function crearCliente(req, res) {
         dni,
         email,
         expreso,
+        transporte,
         nota_envio_optica,
         nota_envio_recibe,
         nota_envio_domicilio,
@@ -588,7 +589,8 @@ export async function crearCliente(req, res) {
         $17,
         $18,
         $19,
-        $20::jsonb
+        $20,
+        $21::jsonb
       )
       RETURNING *
       `,
@@ -605,6 +607,7 @@ export async function crearCliente(req, res) {
         clean(c.dni),
         clean(c.email),
         clean(c.expreso),
+        clean(c.transporte),
 
         clean(
           c.notaEnvioOptica ||
@@ -757,16 +760,17 @@ export async function actualizarCliente(req, res) {
         dni = $10,
         email = $11,
         expreso = $12,
-        nota_envio_optica = $13,
-        nota_envio_recibe = $14,
-        nota_envio_domicilio = $15,
-        nota_envio_localidad = $16,
-        nota_envio_telefono = $17,
-        nota_envio_cuit_dni = $18,
-        nota_envio_horario = $19,
-        archivos_cliente = $20::jsonb,
+        transporte = $13,
+        nota_envio_optica = $14,
+        nota_envio_recibe = $15,
+        nota_envio_domicilio = $16,
+        nota_envio_localidad = $17,
+        nota_envio_telefono = $18,
+        nota_envio_cuit_dni = $19,
+        nota_envio_horario = $20,
+        archivos_cliente = $21::jsonb,
         updated_at = NOW()
-      WHERE id = $21
+      WHERE id = $22
       RETURNING *
       `,
       [
@@ -782,6 +786,7 @@ export async function actualizarCliente(req, res) {
         clean(c.dni),
         clean(c.email),
         clean(c.expreso),
+        clean(c.transporte),
 
         clean(
           c.notaEnvioOptica ||
