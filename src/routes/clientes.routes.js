@@ -6,6 +6,7 @@ import {
   crearCliente,
   actualizarCliente,
   eliminarCliente,
+  getClienteArchivos
 } from "../controllers/clientes.controller.js";
 
 const router = Router();
@@ -21,6 +22,8 @@ router.get("/", getClientes);
  * Devuelve un cliente específico con todos sus logos y DXF.
  */
 router.get("/:id", getClientePorId);
+
+router.get("/:id/archivos", getClienteArchivos);
 
 /**
  * POST /api/clientes

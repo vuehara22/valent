@@ -1,13 +1,20 @@
 import { pool } from "../config/db.js";
 
 function sendDatabaseError(res, error, message) {
-  const isPoolTimeout = String(error?.message || "")
-    .toLowerCase()
-    .includes("timeout exceeded when trying to connect");
+  const errorMessage = String(error?.message || "").toLowerCase();
+
+  const isPoolTimeout =
+    errorMessage.includes("timeout exceeded when trying to connect") ||
+    errorMessage.includes("connection terminated unexpectedly") ||
+    errorMessage.includes("connection timeout");
 
   console.error(message, {
     message: error?.message,
     code: error?.code,
+    stack:
+      process.env.NODE_ENV === "development"
+        ? error?.stack
+        : undefined,
   });
 
   return res.status(isPoolTimeout ? 503 : 500).json({
@@ -47,7 +54,14 @@ function normalizarTipoArchivo(value, nombre = "", mimeType = "") {
     return "DXF";
   }
 
-  if (mimeNormalizado.startsWith("image/")) {
+  if (
+    mimeNormalizado.startsWith("image/") ||
+    nombreNormalizado.endsWith(".png") ||
+    nombreNormalizado.endsWith(".jpg") ||
+    nombreNormalizado.endsWith(".jpeg") ||
+    nombreNormalizado.endsWith(".webp") ||
+    nombreNormalizado.endsWith(".svg")
+  ) {
     return "LOGO";
   }
 
@@ -152,12 +166,20 @@ function parseArchivosClienteDesdeDB(value) {
   return [];
 }
 
-function mapCliente(row) {
+/**
+ * En los listados NO incluimos archivosCliente para evitar enviar
+ * imágenes/DXF en base64 de todos los clientes.
+ *
+ * Para obtener los archivos:
+ * GET /api/clientes/:id
+ * o el endpoint específico GET /api/clientes/:id/archivos
+ */
+function mapCliente(row, { includeArchivos = true } = {}) {
   if (!row) {
     return null;
   }
 
-  return {
+  const cliente = {
     id: Number(row.id),
 
     nombre: row.nombre || "",
@@ -183,13 +205,26 @@ function mapCliente(row) {
     notaEnvioCuitDni: row.nota_envio_cuit_dni || "",
     notaEnvioHorario: row.nota_envio_horario || "",
 
-    archivosCliente: parseArchivosClienteDesdeDB(
-      row.archivos_cliente
+    cantidadArchivos: Math.max(
+      0,
+      Number(row.cantidad_archivos) || 0
     ),
 
     createdAt: row.created_at || null,
     updatedAt: row.updated_at || null,
   };
+
+  if (includeArchivos) {
+    cliente.archivosCliente = parseArchivosClienteDesdeDB(
+      row.archivos_cliente
+    );
+
+    cliente.cantidadArchivos = cliente.archivosCliente.length;
+  } else {
+    cliente.archivosCliente = [];
+  }
+
+  return cliente;
 }
 
 function obtenerArchivosDesdeBody(body) {
@@ -273,7 +308,17 @@ async function existeClienteDuplicado({
   return result.rows[0] || null;
 }
 
+/**
+ * LISTADO LIVIANO
+ *
+ * Importante:
+ * - NO selecciona archivos_cliente.
+ * - Devuelve archivosCliente: [].
+ * - Devuelve cantidadArchivos sin traer los base64.
+ */
 export async function getClientes(_req, res) {
+  const startedAt = Date.now();
+
   try {
     const result = await pool.query(`
       SELECT
@@ -297,18 +342,36 @@ export async function getClientes(_req, res) {
         nota_envio_telefono,
         nota_envio_cuit_dni,
         nota_envio_horario,
-        archivos_cliente,
+        CASE
+          WHEN archivos_cliente IS NULL THEN 0
+          WHEN jsonb_typeof(archivos_cliente) = 'array'
+            THEN jsonb_array_length(archivos_cliente)
+          ELSE 0
+        END AS cantidad_archivos,
         created_at,
         updated_at
       FROM clientes
       ORDER BY nombre ASC, id ASC
     `);
 
-    return res.json(
-      result.rows
-        .map(mapCliente)
-        .filter(Boolean)
-    );
+    const clientes = result.rows
+      .map((row) =>
+        mapCliente(row, {
+          includeArchivos: false,
+        })
+      )
+      .filter(Boolean);
+
+    const durationMs = Date.now() - startedAt;
+
+    if (durationMs >= 1000) {
+      console.warn("🐌 GET /api/clientes lento:", {
+        clientes: clientes.length,
+        durationMs,
+      });
+    }
+
+    return res.json(clientes);
   } catch (error) {
     return sendDatabaseError(
       res,
@@ -318,6 +381,12 @@ export async function getClientes(_req, res) {
   }
 }
 
+/**
+ * DETALLE COMPLETO
+ *
+ * Este endpoint sí trae archivos_cliente porque devuelve
+ * solamente un cliente.
+ */
 export async function getClientePorId(req, res) {
   try {
     const clienteId = Number(req.params.id);
@@ -370,27 +439,79 @@ export async function getClientePorId(req, res) {
       });
     }
 
-    return res.json(mapCliente(result.rows[0]));
+    return res.json(
+      mapCliente(result.rows[0], {
+        includeArchivos: true,
+      })
+    );
   } catch (error) {
-    console.error(
-      "Error al obtener cliente por ID:",
-      error
+    return sendDatabaseError(
+      res,
+      error,
+      "Error al obtener el cliente"
+    );
+  }
+}
+
+/**
+ * ENDPOINT ESPECÍFICO DE ARCHIVOS
+ *
+ * Ruta sugerida:
+ * router.get("/:id/archivos", getClienteArchivos);
+ */
+export async function getClienteArchivos(req, res) {
+  try {
+    const clienteId = Number(req.params.id);
+
+    if (
+      !Number.isInteger(clienteId) ||
+      clienteId <= 0
+    ) {
+      return res.status(400).json({
+        error: "ID de cliente inválido",
+      });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        archivos_cliente
+      FROM clientes
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [clienteId]
     );
 
-    return res.status(500).json({
-      error: "Error al obtener el cliente",
-      detalle:
-        process.env.NODE_ENV === "development"
-          ? error.message
-          : undefined,
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: "Cliente no encontrado",
+      });
+    }
+
+    const archivosCliente =
+      parseArchivosClienteDesdeDB(
+        result.rows[0].archivos_cliente
+      );
+
+    return res.json({
+      clienteId,
+      cantidad: archivosCliente.length,
+      archivosCliente,
     });
+  } catch (error) {
+    return sendDatabaseError(
+      res,
+      error,
+      "Error al obtener los archivos del cliente"
+    );
   }
 }
 
 export async function crearCliente(req, res) {
   try {
     const c = req.body ?? {};
-
     const nombre = clean(c.nombre);
 
     if (!nombre) {
@@ -478,11 +599,8 @@ export async function crearCliente(req, res) {
         clean(c.telefono),
         clean(c.condicionIVA),
         clean(c.cuit),
-
         clean(c.direccionEnvio),
-
         clean(c.direccionFacturacion),
-
         clean(c.nombreApellido),
         clean(c.dni),
         clean(c.email),
@@ -522,24 +640,23 @@ export async function crearCliente(req, res) {
         ),
 
         clean(c.notaEnvioHorario),
-
         JSON.stringify(archivosCliente),
       ]
     );
 
     return res
       .status(201)
-      .json(mapCliente(result.rows[0]));
+      .json(
+        mapCliente(result.rows[0], {
+          includeArchivos: true,
+        })
+      );
   } catch (error) {
-    console.error("Error al crear cliente:", error);
-
-    return res.status(500).json({
-      error: "Error al crear cliente",
-      detalle:
-        process.env.NODE_ENV === "development"
-          ? error.message
-          : undefined,
-    });
+    return sendDatabaseError(
+      res,
+      error,
+      "Error al crear cliente"
+    );
   }
 }
 
@@ -548,6 +665,7 @@ export async function actualizarCliente(req, res) {
 
   try {
     client = await pool.connect();
+
     const clienteId = Number(req.params.id);
     const c = req.body ?? {};
 
@@ -618,19 +736,6 @@ export async function actualizarCliente(req, res) {
         clienteActualResult.rows[0].archivos_cliente
       );
 
-    /*
-     * Cuando el frontend envía archivosCliente,
-     * se guarda exactamente ese array.
-     *
-     * Esto permite:
-     * - agregar varios logos;
-     * - agregar varios DXF;
-     * - eliminar archivos individualmente;
-     * - conservar todos los archivos restantes.
-     *
-     * Si el frontend no envía archivosCliente,
-     * se mantienen los archivos existentes.
-     */
     const archivosCliente =
       archivosRecibidos.fueEnviado
         ? archivosRecibidos.archivos
@@ -671,11 +776,8 @@ export async function actualizarCliente(req, res) {
         clean(c.telefono),
         clean(c.condicionIVA),
         clean(c.cuit),
-
         clean(c.direccionEnvio),
-
         clean(c.direccionFacturacion),
-
         clean(c.nombreApellido),
         clean(c.dni),
         clean(c.email),
@@ -715,31 +817,28 @@ export async function actualizarCliente(req, res) {
         ),
 
         clean(c.notaEnvioHorario),
-
         JSON.stringify(archivosCliente),
-
         clienteId,
       ]
     );
 
     await client.query("COMMIT");
 
-    return res.json(mapCliente(result.rows[0]));
-  } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
-
-    console.error(
-      "Error al actualizar cliente:",
-      error
+    return res.json(
+      mapCliente(result.rows[0], {
+        includeArchivos: true,
+      })
     );
+  } catch (error) {
+    if (client) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
 
-    return res.status(500).json({
-      error: "Error al actualizar cliente",
-      detalle:
-        process.env.NODE_ENV === "development"
-          ? error.message
-          : undefined,
-    });
+    return sendDatabaseError(
+      res,
+      error,
+      "Error al actualizar cliente"
+    );
   } finally {
     if (client) {
       client.release();
@@ -808,20 +907,15 @@ export async function eliminarCliente(req, res) {
 
     return res.json({
       ok: true,
-      cliente: mapCliente(result.rows[0]),
+      cliente: mapCliente(result.rows[0], {
+        includeArchivos: true,
+      }),
     });
   } catch (error) {
-    console.error(
-      "Error al eliminar cliente:",
-      error
+    return sendDatabaseError(
+      res,
+      error,
+      "Error al eliminar cliente"
     );
-
-    return res.status(500).json({
-      error: "Error al eliminar cliente",
-      detalle:
-        process.env.NODE_ENV === "development"
-          ? error.message
-          : undefined,
-    });
   }
 }
