@@ -340,15 +340,17 @@ export async function getClientes(_req, res) {
         nota_envio_telefono,
         nota_envio_cuit_dni,
         nota_envio_horario,
-        archivos_cliente,
+
         CASE
           WHEN archivos_cliente IS NULL THEN 0
           WHEN jsonb_typeof(archivos_cliente) = 'array'
             THEN jsonb_array_length(archivos_cliente)
           ELSE 0
         END AS cantidad_archivos,
+
         created_at,
         updated_at
+
       FROM clientes
       ORDER BY nombre ASC, id ASC
     `);
@@ -356,7 +358,7 @@ export async function getClientes(_req, res) {
     const clientes = result.rows
       .map((row) =>
         mapCliente(row, {
-          includeArchivos: true,
+          includeArchivos: false,
         })
       )
       .filter(Boolean);
@@ -379,7 +381,6 @@ export async function getClientes(_req, res) {
     );
   }
 }
-
 /**
  * DETALLE COMPLETO
  *

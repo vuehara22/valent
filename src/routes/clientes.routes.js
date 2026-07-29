@@ -16,14 +16,16 @@ const router = Router();
  * Devuelve todos los clientes.
  */
 router.get("/", getClientes);
-
+ /**  Devuelve un cliente específico con todos sus logos y DXF.
+ **/
+router.get("/:id/archivos", getClienteArchivos);
 /**
  * GET /api/clientes/:id
- * Devuelve un cliente específico con todos sus logos y DXF.
+
  */
 router.get("/:id", getClientePorId);
 
-router.get("/:id/archivos", getClienteArchivos);
+
 
 /**
  * POST /api/clientes
