@@ -13,6 +13,27 @@ const PEDIDO_COLUMNS = `
   updated_at
 `;
 
+/**
+ * Columnas utilizadas únicamente para el listado general.
+ *
+ * `archivosPedido` contiene logos, DXF y otros archivos pesados.
+ * Se excluye solamente de GET /api/pedidos para evitar enviar varios MB
+ * en cada carga. Los datos siguen guardados en PostgreSQL y continúan
+ * disponibles en GET /api/pedidos/:id.
+ */
+const PEDIDO_LIST_COLUMNS = `
+  id,
+  cliente,
+  sector,
+  prioridad,
+  dias,
+  estados,
+  COALESCE(extras, '{}'::jsonb) - 'archivosPedido' AS extras,
+  fecha,
+  created_at,
+  updated_at
+`;
+
 function safeJson(value, fallback) {
   if (value == null) return fallback;
 
@@ -260,8 +281,17 @@ function sendDatabaseError(
 
 export async function getPedidos(_req, res) {
   try {
+    /*
+     * El listado general no necesita transportar el contenido completo de
+     * logos y DXF. Excluir `extras.archivosPedido` directamente en PostgreSQL
+     * evita que esos datos pesados viajen hacia Node.js y luego al navegador.
+     *
+     * No se elimina ni modifica información de la base de datos.
+     * getPedidoById sigue usando PEDIDO_COLUMNS y devuelve el pedido completo,
+     * incluyendo `extras.archivosPedido`.
+     */
     const result = await pool.query(`
-      SELECT ${PEDIDO_COLUMNS}
+      SELECT ${PEDIDO_LIST_COLUMNS}
       FROM pedidos
       ORDER BY fecha DESC NULLS LAST, id DESC
     `);
